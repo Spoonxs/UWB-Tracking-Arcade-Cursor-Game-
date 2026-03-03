@@ -1,0 +1,71 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 62763)
+Traceback (most recent call last):
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\http\server.py", line 1320, in finish_request
+    self.RequestHandlerClass(request, client_address, self,
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                             directory=args.directory)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\http\server.py", line 672, in __init__
+    super().__init__(*args, **kwargs)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\http\server.py", line 436, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\http\server.py", line 404, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\socket.py", line 719, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+----------------------------------------
+127.0.0.1 - - [16/Feb/2026 16:03:46] "GET /cursor_game.html HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:03:47] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:09] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/generated/sprites_screen/coin.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/generated/sprites_screen/bomb.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/generated/sprites_screen/warning.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/generated/sprites_screen/goal.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/generated/sprites_screen/checkpoint.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/generated/sprites_screen/rhythm.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /assets/sprites/tabler/skull.svg HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:04:10] code 404, message File not found
+127.0.0.1 - - [16/Feb/2026 16:04:10] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [16/Feb/2026 16:05:18] "GET /warioware.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:05:57] "GET /warioware.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:06:18] "GET /runner.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:07:25] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:08:08] "GET /warioware.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:09:33] "GET /runner.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:09:39] "GET /suika.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:14:44] "GET /runner.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:14:50] "GET /fruit_ninja.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:17:36] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:17:53] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:18:39] "GET /runner.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:18:42] "GET /fruit_ninja.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:19:04] "GET /breakout.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:20:05] "GET /warioware.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:20:24] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:21:00] "GET /breakout.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:22:07] "GET /breakout.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:22:09] code 404, message File not found
+127.0.0.1 - - [16/Feb/2026 16:22:09] "GET /favicon.ico HTTP/1.1" 404 -
+127.0.0.1 - - [16/Feb/2026 16:24:57] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 304 -
+127.0.0.1 - - [16/Feb/2026 16:27:14] "GET /cursor_game.html?input=tag&tag1=1&tag2=2&ws=ws://127.0.0.1:8765 HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/generated/sprites_screen/coin.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/generated/sprites_screen/rhythm.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/generated/sprites_screen/checkpoint.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/generated/sprites_screen/bomb.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/generated/sprites_screen/goal.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/generated/sprites_screen/warning.png HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /assets/sprites/tabler/skull.svg HTTP/1.1" 200 -
+127.0.0.1 - - [16/Feb/2026 16:27:15] code 404, message File not found
+127.0.0.1 - - [16/Feb/2026 16:27:15] "GET /favicon.ico HTTP/1.1" 404 -

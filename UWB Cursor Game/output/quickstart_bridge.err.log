@@ -1,0 +1,28 @@
+C:\Users\obara\Documents\UWB Cursor Game\bridge.py:32: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+  from websockets.server import WebSocketServerProtocol
+connection handler failed
+Traceback (most recent call last):
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\site-packages\websockets\asyncio\server.py", line 376, in conn_handler
+    await self.handler(connection)
+  File "C:\Users\obara\Documents\UWB Cursor Game\bridge.py", line 271, in ws_handler
+    async for _ in websocket:
+        pass
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\site-packages\websockets\asyncio\connection.py", line 244, in __aiter__
+    yield await self.recv()
+          ^^^^^^^^^^^^^^^^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\site-packages\websockets\asyncio\connection.py", line 324, in recv
+    raise self.protocol.close_exc from self.recv_exc
+websockets.exceptions.ConnectionClosedError: no close frame received or sent
+connection handler failed
+Traceback (most recent call last):
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\site-packages\websockets\asyncio\server.py", line 376, in conn_handler
+    await self.handler(connection)
+  File "C:\Users\obara\Documents\UWB Cursor Game\bridge.py", line 271, in ws_handler
+    async for _ in websocket:
+        pass
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\site-packages\websockets\asyncio\connection.py", line 244, in __aiter__
+    yield await self.recv()
+          ^^^^^^^^^^^^^^^^^
+  File "C:\Users\obara\AppData\Local\Programs\Python\Python313\Lib\site-packages\websockets\asyncio\connection.py", line 324, in recv
+    raise self.protocol.close_exc from self.recv_exc
+websockets.exceptions.ConnectionClosedError: no close frame received or sent

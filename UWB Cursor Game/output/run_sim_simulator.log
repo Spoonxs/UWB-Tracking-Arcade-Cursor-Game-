@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/mnt/c/Users/obara/Documents/UWB Cursor Game/simulate_research_repo_tags.py", line 105, in <module>
+    main()
+  File "/mnt/c/Users/obara/Documents/UWB Cursor Game/simulate_research_repo_tags.py", line 62, in main
+    sim1 = sim_cls()
+           ^^^^^^^^^
+  File "/mnt/c/Users/obara/Documents/UWB Cursor Game/external/esp32-uwb-positioning-system/python/uwb_tag_simulator.py", line 12, in __init__
+    self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/socket.py", line 233, in __init__
+    _socket.socket.__init__(self, family, type, proto, fileno)
+PermissionError: [Errno 1] Operation not permitted
