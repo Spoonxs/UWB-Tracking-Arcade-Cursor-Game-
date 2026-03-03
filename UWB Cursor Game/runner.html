@@ -1,0 +1,1691 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UWB Runner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: rgb(10, 10, 15);
+      font-family: "Outfit", sans-serif;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script>
+const CONFIG = {
+  WS_URL: "ws://localhost:8765",
+  UWB_BOUNDS: { xMin: 0, xMax: 4, yMin: 0, yMax: 3 },
+  PLAYER_TAGS: { p1: 1, p2: 2 },
+  CURSOR: {
+    size: 24,
+    trailLength: 12,
+    p1Color: [0, 210, 255],
+    p2Color: [255, 50, 200]
+  },
+  DEMO_TIMEOUT_MS: 3000,
+  WORLD_PADDING: 100,
+  PLAYER_ACTIVE_TIMEOUT_MS: 1200,
+  FILTER: {
+    minCutoff: 1.0,
+    beta: 0.007,
+    dCutoff: 1.0,
+    freq: 20
+  }
+};
+
+const POWERUP_TYPES = ["magnet", "shield", "double", "shrink"];
+
+const game = {
+  state: "start",
+  players: {
+    p1: createPlayer(CONFIG.PLAYER_TAGS.p1, "P1", CONFIG.CURSOR.p1Color),
+    p2: createPlayer(CONFIG.PLAYER_TAGS.p2, "P2", CONFIG.CURSOR.p2Color)
+  },
+  ws: {
+    socket: null,
+    connected: false,
+    reconnectTimer: null,
+    lastDataMs: 0,
+    packetCount: 0,
+    parseErrors: 0,
+    lastTag: null
+  },
+  demo: {
+    enabled: true,
+    forced: false
+  },
+  ambientParticles: [],
+  effects: {
+    flash: { active: false, startMs: 0, duration: 0, color: [255, 255, 255], alpha: 0 },
+    shake: { active: false, startMs: 0, duration: 0, intensity: 0 },
+    burstParticles: [],
+    floatingScores: []
+  },
+  input: {
+    prevMouseDown: false,
+    backHoverMs: 0,
+    stillStartMs: 0,
+    pauseStill: false,
+    lastLaneSwitchMs: 0,
+    lastStillX: 0,
+    lastStillY: 0
+  },
+  ui: {
+    countdownStartMs: 0,
+    message: "",
+    speedUpUntil: 0,
+    zoneFlashJump: 0,
+    zoneFlashSlide: 0,
+    startHoldMs: 0,
+    startHoldX: 0,
+    startHoldY: 0
+  },
+  runner: {
+    roadScroll: 0,
+    speed: 4,
+    lane: 1,
+    laneVisual: 1,
+    targetLaneX: 0,
+    laneX: 0,
+    y: 0,
+    jumpLevel: 0,
+    jumpOffset: 0,
+    jumpVy: 0,
+    slide: 0,
+    actionZone: "run",
+    prevActionZone: "run",
+    invincibleUntil: 0,
+    shieldCharges: 0,
+    blink: false,
+    trail: [],
+    hitAt: 0
+  },
+  spawn: {
+    obstacleTimer: 70,
+    coinTimer: 42,
+    powerTimerMs: 0,
+    lastObstacleLane: -1,
+    lastObstacleType: ""
+  },
+  entities: {
+    obstacles: [],
+    coins: [],
+    powerups: []
+  },
+  stats: {
+    score: 0,
+    displayedScore: 0,
+    distance: 0,
+    coinPoints: 0,
+    coins: 0,
+    lives: 3,
+    highScore: 0,
+    bestCombo: 1,
+    currentCombo: 0,
+    comboMult: 1,
+    lastCoinFrame: -9999,
+    nearMisses: 0
+  },
+  activePowerups: {
+    magnetUntil: 0,
+    doubleUntil: 0,
+    shrinkUntil: 0
+  },
+  paused: false,
+  navigateTo: ""
+};
+let runtimeQueryString = "";
+const SHARED_CALIBRATION_KEY = "uwb_room_calibration_v1";
+
+function isValidBounds(bounds) {
+  if (!bounds) return false;
+  const xMin = Number(bounds.xMin);
+  const xMax = Number(bounds.xMax);
+  const yMin = Number(bounds.yMin);
+  const yMax = Number(bounds.yMax);
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax) && xMax > xMin && yMax > yMin;
+}
+
+function readSharedCalibrationBounds(tagId = CONFIG.PLAYER_TAGS.p1) {
+  try {
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const byTag = payload && payload.tags ? payload.tags[String(tagId)] : null;
+    if (isValidBounds(byTag)) return byTag;
+    if (isValidBounds(payload && payload.global)) return payload.global;
+  } catch (err) {}
+  return null;
+}
+
+function resolveUwbBoundsForTag(tagId = CONFIG.PLAYER_TAGS.p1) {
+  return readSharedCalibrationBounds(tagId) || CONFIG.UWB_BOUNDS;
+}
+
+function createPlayer(tagId, label, color) {
+  return {
+    tagId,
+    label,
+    color,
+    active: false,
+    screenX: null,
+    screenY: null,
+    rawX: null,
+    rawY: null,
+    lastUpdateMs: 0,
+    trail: [],
+    filters: null
+  };
+}
+
+function ensurePlayerFilters(player) {
+  if (player.filters) return;
+  player.filters = {
+    x: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff),
+    y: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff)
+  };
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  textFont("Outfit");
+  applyURLOverrides();
+  initializeAmbientParticles();
+  connectWebSocket();
+  resetRunner(true);
+  exposeAutomationHooks();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  initializeAmbientParticles();
+  placeRunner();
+}
+
+function placeRunner() {
+  game.runner.y = height * 0.78;
+  const lanes = getLaneCenters();
+  game.runner.laneX = lanes[game.runner.lane];
+  game.runner.targetLaneX = lanes[game.runner.lane];
+}
+
+function resetRunner(toStart = false) {
+  game.entities.obstacles = [];
+  game.entities.coins = [];
+  game.entities.powerups = [];
+  game.stats.score = 0;
+  game.stats.displayedScore = 0;
+  game.stats.distance = 0;
+  game.stats.coinPoints = 0;
+  game.stats.coins = 0;
+  game.stats.lives = 3;
+  game.stats.currentCombo = 0;
+  game.stats.comboMult = 1;
+  game.stats.lastCoinFrame = -9999;
+  game.stats.bestCombo = 1;
+  game.stats.nearMisses = 0;
+  game.runner.speed = 4;
+  game.runner.lane = 1;
+  game.runner.laneVisual = 1;
+  game.runner.jumpLevel = 0;
+  game.runner.jumpOffset = 0;
+  game.runner.jumpVy = 0;
+  game.runner.slide = 0;
+  game.runner.actionZone = "run";
+  game.runner.prevActionZone = "run";
+  game.runner.invincibleUntil = 0;
+  game.runner.shieldCharges = 0;
+  game.runner.trail = [];
+  game.spawn.obstacleTimer = 70;
+  game.spawn.coinTimer = 42;
+  game.spawn.lastObstacleLane = -1;
+  game.spawn.lastObstacleType = "";
+  game.spawn.powerTimerMs = millis() + random(15000, 20000);
+  game.activePowerups.magnetUntil = 0;
+  game.activePowerups.doubleUntil = 0;
+  game.activePowerups.shrinkUntil = 0;
+  game.paused = false;
+  game.ui.startHoldMs = 0;
+  game.ui.startHoldX = 0;
+  game.ui.startHoldY = 0;
+  placeRunner();
+  game.state = toStart ? "start" : "countdown";
+  game.ui.countdownStartMs = millis();
+}
+
+function draw() {
+  updateDemoMode();
+  pruneStalePlayers();
+  updatePlayerTrails();
+  updateEffects();
+
+  drawBackground();
+  drawAmbientParticles();
+
+  push();
+  applyScreenShake();
+  drawRoad();
+
+  if (game.state === "start") {
+    drawStartScreen();
+  } else if (game.state === "countdown") {
+    updateCountdown();
+    drawRunnerGameplay(true);
+  } else if (game.state === "playing") {
+    if (!game.paused) updateRunnerGameplay();
+    drawRunnerGameplay(false);
+  } else if (game.state === "gameover") {
+    drawRunnerGameplay(false);
+    drawGameOver();
+  }
+
+  drawBurstParticles();
+  drawFloatingScores();
+  drawCursors();
+  pop();
+
+  drawHUD();
+  drawConnectionIndicator();
+  drawDemoBadge();
+  drawScreenFlash();
+  drawBackButton();
+
+  if (game.navigateTo) {
+    const url = game.navigateTo;
+    game.navigateTo = "";
+    window.location.href = url;
+  }
+
+  game.input.prevMouseDown = mouseIsPressed;
+}
+
+function updateCountdown() {
+  const t = millis() - game.ui.countdownStartMs;
+  if (t >= 3000) {
+    game.state = "playing";
+  }
+}
+
+function drawStartScreen() {
+  updateStartHoldToBegin();
+
+  textAlign(CENTER, CENTER);
+  fill(255, 240);
+  textStyle(900);
+  textSize(min(84, width * 0.12));
+  text("RUNNER", width * 0.5, height * 0.24);
+
+  fill(220, 236, 255, 180);
+  textStyle(500);
+  textSize(20);
+  text("Move LEFT/RIGHT to switch lanes", width * 0.5, height * 0.36);
+  text("Move UP to jump, DOWN to slide", width * 0.5, height * 0.41);
+
+  drawZoneHints();
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 120, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(28);
+  text("Press SPACE to start", width * 0.5, height * 0.56);
+
+  const holdPct = getStartHoldPct();
+  if (holdPct > 0) {
+    const cx = width * 0.5;
+    const cy = height * 0.62;
+    noFill();
+    stroke(255, 200);
+    strokeWeight(3);
+    circle(cx, cy, 38);
+    stroke(120, 230, 255, 230);
+    arc(cx, cy, 38, 38, -HALF_PI, -HALF_PI + TWO_PI * holdPct);
+  }
+}
+
+function getStartHoldPct() {
+  if (!game.ui.startHoldMs) return 0;
+  return constrain((millis() - game.ui.startHoldMs) / 1100, 0, 1);
+}
+
+function updateStartHoldToBegin() {
+  const p = game.players.p1;
+  const px = p.active && p.screenX !== null ? p.screenX : mouseX;
+  const py = p.active && p.screenY !== null ? p.screenY : mouseY;
+  if (!game.ui.startHoldMs) {
+    game.ui.startHoldMs = millis();
+    game.ui.startHoldX = px;
+    game.ui.startHoldY = py;
+    return;
+  }
+  if (dist(px, py, game.ui.startHoldX, game.ui.startHoldY) > 16) {
+    game.ui.startHoldMs = millis();
+    game.ui.startHoldX = px;
+    game.ui.startHoldY = py;
+    return;
+  }
+  if (millis() - game.ui.startHoldMs > 1100) {
+    game.state = "countdown";
+    game.ui.countdownStartMs = millis();
+    game.ui.startHoldMs = 0;
+  }
+}
+
+function drawGameOver() {
+  noStroke();
+  fill(8, 10, 18, 170);
+  rect(0, 0, width, height);
+
+  textAlign(CENTER, CENTER);
+  fill(255, 230);
+  textStyle(900);
+  textSize(68);
+  text("GAME OVER", width * 0.5, height * 0.34);
+
+  textStyle(600);
+  textSize(28);
+  fill(255, 205);
+  text(`Score ${floor(game.stats.score)}`, width * 0.5, height * 0.44);
+
+  textStyle(500);
+  textSize(18);
+  fill(220, 230, 255, 180);
+  text(`Distance ${floor(game.stats.distance)}   Coins ${game.stats.coins}   Best Combo x${game.stats.bestCombo}`,
+    width * 0.5, height * 0.5);
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 120, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(24);
+  text("Press SPACE to retry", width * 0.5, height * 0.6);
+}
+
+function updateRunnerGameplay() {
+  const p1 = game.players.p1;
+  if (p1.active) {
+    updateRunnerIntentFromCursor(p1);
+  }
+
+  updatePauseByStillness(p1);
+  if (game.paused) return;
+
+  updateRunnerMotion();
+  updateSpawning();
+  updateObstacles();
+  updateCoins();
+  updatePowerups();
+  updateScoreAndDifficulty();
+}
+
+function updatePauseByStillness(player) {
+  if (!player || !player.active || player.screenX === null || player.screenY === null) {
+    game.input.stillStartMs = 0;
+    return;
+  }
+  if (!game.input.pauseStill) {
+    game.input.pauseStill = true;
+    game.input.stillStartMs = millis();
+    game.input.lastStillX = player.screenX;
+    game.input.lastStillY = player.screenY;
+    return;
+  }
+  const moveThreshold = isUwbControlActive() ? 12 : 8;
+  const pauseDelayMs = isUwbControlActive() ? 3800 : 3000;
+  const d = dist(player.screenX, player.screenY, game.input.lastStillX, game.input.lastStillY);
+  if (d > moveThreshold) {
+    game.input.stillStartMs = millis();
+    game.input.lastStillX = player.screenX;
+    game.input.lastStillY = player.screenY;
+    if (game.paused) game.paused = false;
+    return;
+  }
+  if (!game.paused && millis() - game.input.stillStartMs > pauseDelayMs && game.state === "playing") {
+    game.paused = true;
+  }
+}
+
+function updateRunnerIntentFromCursor(player) {
+  const lanes = getLaneCenters();
+  const currLane = constrain(game.runner.lane, 0, 2);
+  let bestLane = currLane;
+  let bestDist = abs(player.screenX - lanes[currLane]);
+  for (let i = 0; i < 3; i++) {
+    const d = abs(player.screenX - lanes[i]);
+    if (d < bestDist) {
+      bestDist = d;
+      bestLane = i;
+    }
+  }
+
+  if (isUwbControlActive()) {
+    const deadband = 22;
+    const currDist = abs(player.screenX - lanes[currLane]);
+    if (bestLane !== currLane && bestDist + deadband < currDist) {
+      if (millis() - game.input.lastLaneSwitchMs > 85) {
+        game.runner.lane = bestLane;
+        game.input.lastLaneSwitchMs = millis();
+      }
+    }
+  } else {
+    game.runner.lane = bestLane;
+  }
+
+  const yNorm = player.screenY / max(1, height);
+  const jumpThreshold = isUwbControlActive() ? 0.25 : 0.33;
+  const slideThreshold = isUwbControlActive() ? 0.75 : 0.67;
+  if (yNorm < jumpThreshold) {
+    game.runner.actionZone = "jump";
+  } else if (yNorm > slideThreshold) {
+    game.runner.actionZone = "slide";
+  } else {
+    game.runner.actionZone = "run";
+  }
+
+  if (game.runner.actionZone !== game.runner.prevActionZone) {
+    if (game.runner.actionZone === "jump") game.ui.zoneFlashJump = millis() + 260;
+    if (game.runner.actionZone === "slide") game.ui.zoneFlashSlide = millis() + 260;
+    game.runner.prevActionZone = game.runner.actionZone;
+  }
+}
+
+function updateRunnerMotion() {
+  const lanes = getLaneCenters();
+  game.runner.targetLaneX = lanes[game.runner.lane];
+  game.runner.laneX = lerp(game.runner.laneX, game.runner.targetLaneX, isUwbControlActive() ? 0.24 : 0.18);
+
+  const targetJump = game.runner.actionZone === "jump" ? 1 : 0;
+  const riseLerp = isUwbControlActive() ? 0.16 : 0.13;
+  const fallLerp = isUwbControlActive() ? 0.12 : 0.10;
+  const jumpLerp = targetJump > game.runner.jumpLevel ? riseLerp : fallLerp;
+  game.runner.jumpLevel = lerp(game.runner.jumpLevel, targetJump, jumpLerp);
+  if (abs(game.runner.jumpLevel - targetJump) < 0.001) {
+    game.runner.jumpLevel = targetJump;
+  }
+  const jumpHeight = isUwbControlActive() ? 62 : 74;
+  game.runner.jumpOffset = -jumpHeight * easeInOutCubic(game.runner.jumpLevel);
+  game.runner.jumpVy = 0;
+
+  const targetSlide = game.runner.actionZone === "slide" ? 1 : 0;
+  game.runner.slide = lerp(game.runner.slide, targetSlide, 0.22);
+
+  game.runner.roadScroll += game.runner.speed;
+  if (game.runner.roadScroll > 10000) game.runner.roadScroll = 0;
+
+  game.runner.trail.unshift({ x: game.runner.laneX, y: game.runner.y + game.runner.jumpOffset });
+  if (game.runner.trail.length > floor(map(game.runner.speed, 4, 11, 6, 20))) {
+    game.runner.trail.length = floor(map(game.runner.speed, 4, 11, 6, 20));
+  }
+}
+
+function easeInOutCubic(t) {
+  const x = constrain(t, 0, 1);
+  return x < 0.5 ? 4 * x * x * x : 1 - pow(-2 * x + 2, 3) / 2;
+}
+
+function getRunnerBody() {
+  const shrink = millis() < game.activePowerups.shrinkUntil ? 0.5 : 1;
+  const w = 30 * shrink + (1 - game.runner.slide) * 2;
+  const h = lerp(22, 45, 1 - game.runner.slide) * shrink;
+  const y = game.runner.y + game.runner.jumpOffset - h * 0.5;
+  return { x: game.runner.laneX, y, w, h };
+}
+
+function getLaneCenters() {
+  const road = getRoadBounds();
+  const laneW = (road.right - road.left) / 3;
+  return [road.left + laneW * 0.5, road.left + laneW * 1.5, road.left + laneW * 2.5];
+}
+
+function getRoadBounds() {
+  const midW = width * 0.6;
+  const left = width * 0.5 - midW * 0.5;
+  const right = width * 0.5 + midW * 0.5;
+  return { left, right, w: midW };
+}
+
+function isUwbControlActive() {
+  const p = game.players.p1;
+  return !game.demo.enabled && p.active && p.screenX !== null && p.screenY !== null;
+}
+
+function updateSpawning() {
+  game.spawn.obstacleTimer -= game.runner.speed;
+  const obstacleGap = map(game.runner.speed, 4, 11, 84, 42) + (isUwbControlActive() ? 14 : 0);
+  if (game.spawn.obstacleTimer <= 0) {
+    spawnObstacle();
+    game.spawn.obstacleTimer = random(obstacleGap * 0.8, obstacleGap * 1.2);
+  }
+
+  game.spawn.coinTimer -= game.runner.speed;
+  if (game.spawn.coinTimer <= 0) {
+    spawnCoinPattern();
+    game.spawn.coinTimer = random(30, 56);
+  }
+
+  if (millis() >= game.spawn.powerTimerMs) {
+    spawnPowerup();
+    game.spawn.powerTimerMs = millis() + random(13000, 18500);
+  }
+}
+
+function spawnObstacle() {
+  const y = -80;
+  const lanes = getLaneCenters();
+  let candidate = null;
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const roll = random();
+    let type = "barrier";
+    if (roll < 0.22) type = "low";
+    else if (roll < 0.40) type = "overhead";
+    else if (roll < 0.52 && game.spawn.lastObstacleType !== "wide") type = "wide";
+
+    if (type === "wide") {
+      const gapLane = floor(random(3));
+      candidate = {
+        type,
+        lane: -1,
+        gapLane,
+        y,
+        h: 32,
+        w: (lanes[2] - lanes[0]) * 1.75,
+        passed: false,
+        hit: false
+      };
+    } else {
+      const lane = floor(random(3));
+      candidate = {
+        type,
+        lane,
+        y,
+        h: type === "low" ? 20 : 32,
+        w: 82,
+        passed: false,
+        hit: false
+      };
+    }
+
+    if (spawnCandidateLeavesSafeLane(candidate)) break;
+    candidate = null;
+  }
+
+  if (!candidate) return;
+  game.entities.obstacles.push(candidate);
+  game.spawn.lastObstacleType = candidate.type;
+}
+
+function spawnCandidateLeavesSafeLane(candidate) {
+  const blocked = [false, false, false];
+  for (const o of game.entities.obstacles) {
+    if (o.y < -130 || o.y > 220) continue;
+    if (o.type === "wide") {
+      for (let lane = 0; lane < 3; lane++) {
+        if (lane !== o.gapLane) blocked[lane] = true;
+      }
+    } else {
+      blocked[o.lane] = true;
+    }
+  }
+
+  if (candidate.type === "wide") {
+    for (let lane = 0; lane < 3; lane++) {
+      if (lane !== candidate.gapLane) blocked[lane] = true;
+    }
+  } else {
+    blocked[candidate.lane] = true;
+  }
+
+  return blocked.some((b) => !b);
+}
+
+function spawnCoinPattern() {
+  const pattern = random(["single", "line", "zigzag", "arc"]);
+  if (pattern === "single") {
+    game.entities.coins.push(makeCoin(floor(random(3)), -20));
+    return;
+  }
+
+  if (pattern === "line") {
+    const lane = floor(random(3));
+    const count = floor(random(3, 6));
+    for (let i = 0; i < count; i++) {
+      game.entities.coins.push(makeCoin(lane, -20 - i * 44));
+    }
+    return;
+  }
+
+  if (pattern === "zigzag") {
+    const start = floor(random(3));
+    const seq = [start, (start + 1) % 3, (start + 2) % 3, (start + 1) % 3, start];
+    for (let i = 0; i < seq.length; i++) {
+      game.entities.coins.push(makeCoin(seq[i], -20 - i * 38));
+    }
+    return;
+  }
+
+  const seq = [0, 1, 2, 1, 0];
+  for (let i = 0; i < seq.length; i++) {
+    game.entities.coins.push(makeCoin(seq[i], -20 - i * 36));
+  }
+}
+
+function makeCoin(lane, y) {
+  return { lane, y, r: 12, collected: false, xOffset: random(-8, 8) };
+}
+
+function spawnPowerup() {
+  const lane = floor(random(3));
+  game.entities.powerups.push({
+    lane,
+    y: -50,
+    r: 14,
+    type: random(POWERUP_TYPES),
+    rot: random(TWO_PI)
+  });
+}
+
+function updateObstacles() {
+  const body = getRunnerBody();
+  const laneCenters = getLaneCenters();
+  const now = millis();
+  const invincible = now < game.runner.invincibleUntil;
+
+  for (let i = game.entities.obstacles.length - 1; i >= 0; i--) {
+    const o = game.entities.obstacles[i];
+    o.y += game.runner.speed;
+
+    const obstacleX = o.type === "wide" ? width * 0.5 : laneCenters[o.lane];
+    const nearPlayerY = abs(o.y - body.y) < (isUwbControlActive() ? 29 : 34);
+
+    if (!o.hit && nearPlayerY && !invincible) {
+      let collided = false;
+      if (o.type === "wide") {
+        collided = game.runner.lane !== o.gapLane;
+      } else if (o.lane === game.runner.lane) {
+        if (o.type === "barrier") collided = true;
+        if (o.type === "low") collided = game.runner.jumpOffset > (isUwbControlActive() ? -24 : -34);
+        if (o.type === "overhead") collided = game.runner.slide < (isUwbControlActive() ? 0.35 : 0.55);
+      }
+
+      if (collided) {
+        o.hit = true;
+        handleRunnerHit();
+      }
+    }
+
+    if (!o.passed && o.y > body.y + 26) {
+      o.passed = true;
+      if (!o.hit && o.type !== "wide" && o.lane === game.runner.lane) {
+        game.stats.nearMisses++;
+        game.stats.score += 5;
+        addFloatingText(body.x, body.y - 30, "CLOSE!", [255, 208, 120]);
+      }
+    }
+
+    if (o.y > height + 90) {
+      game.entities.obstacles.splice(i, 1);
+    }
+  }
+}
+
+function handleRunnerHit() {
+  const now = millis();
+  if (game.runner.shieldCharges > 0) {
+    game.runner.shieldCharges--;
+    triggerFlash([132, 255, 160], 200, 90);
+    emitParticles(game.runner.laneX, game.runner.y + game.runner.jumpOffset, [132, 255, 160], 18, 5);
+    game.runner.invincibleUntil = now + 900;
+    return;
+  }
+
+  game.stats.lives--;
+  game.runner.invincibleUntil = now + 2000;
+  game.runner.hitAt = now;
+  triggerShake(8, 220);
+  triggerFlash([239, 68, 68], 220, 120);
+
+  if (game.stats.lives <= 0) {
+    game.stats.highScore = max(game.stats.highScore, floor(game.stats.score));
+    game.state = "gameover";
+  }
+}
+
+function updateCoins() {
+  const body = getRunnerBody();
+  const lanes = getLaneCenters();
+  const magnetOn = millis() < game.activePowerups.magnetUntil;
+  const doubleOn = millis() < game.activePowerups.doubleUntil;
+
+  for (let i = game.entities.coins.length - 1; i >= 0; i--) {
+    const c = game.entities.coins[i];
+    c.y += game.runner.speed;
+    const baseX = lanes[c.lane] + c.xOffset;
+    let cx = baseX;
+
+    if (magnetOn) {
+      const d = dist(baseX, c.y, body.x, body.y);
+      if (d < 100) {
+        cx = lerp(baseX, body.x, 0.2);
+      }
+    }
+
+    const pickupScale = isUwbControlActive() ? 0.42 : 0.32;
+    if (dist(cx, c.y, body.x, body.y) < c.r + max(body.w, body.h) * pickupScale) {
+      const frameDelta = frameCount - game.stats.lastCoinFrame;
+      if (frameDelta <= 30) {
+        game.stats.currentCombo++;
+      } else {
+        game.stats.currentCombo = 1;
+      }
+      game.stats.lastCoinFrame = frameCount;
+
+      game.stats.comboMult = 1;
+      if (game.stats.currentCombo >= 10) game.stats.comboMult = 4;
+      else if (game.stats.currentCombo >= 6) game.stats.comboMult = 3;
+      else if (game.stats.currentCombo >= 3) game.stats.comboMult = 2;
+
+      game.stats.bestCombo = max(game.stats.bestCombo, game.stats.comboMult);
+
+      const points = 10 * game.stats.comboMult * (doubleOn ? 2 : 1);
+      game.stats.coinPoints += points;
+      game.stats.coins++;
+      addFloatingText(cx, c.y, `+${points}`, [132, 255, 120]);
+      emitParticles(cx, c.y, [255, 215, 80], 8, 3.8);
+      game.entities.coins.splice(i, 1);
+      continue;
+    }
+
+    if (c.y > height + 30) {
+      game.entities.coins.splice(i, 1);
+    }
+  }
+
+  if (frameCount - game.stats.lastCoinFrame > 30) {
+    game.stats.currentCombo = 0;
+    game.stats.comboMult = 1;
+  }
+}
+
+function updatePowerups() {
+  const body = getRunnerBody();
+  const lanes = getLaneCenters();
+  const now = millis();
+
+  for (let i = game.entities.powerups.length - 1; i >= 0; i--) {
+    const p = game.entities.powerups[i];
+    p.y += game.runner.speed * 0.6;
+    p.rot += 0.04;
+    const px = lanes[p.lane];
+
+    const catchScale = isUwbControlActive() ? 0.52 : 0.38;
+    if (dist(px, p.y, body.x, body.y) < p.r + max(body.w, body.h) * catchScale) {
+      applyPowerup(p.type);
+      emitParticles(px, p.y, powerColor(p.type), 16, 4.5);
+      addFloatingText(px, p.y - 16, p.type.toUpperCase(), powerColor(p.type));
+      game.entities.powerups.splice(i, 1);
+      continue;
+    }
+
+    if (p.y > height + 30) {
+      game.entities.powerups.splice(i, 1);
+    }
+  }
+
+  if (now >= game.activePowerups.shrinkUntil && game.activePowerups.shrinkUntil !== 0) {
+    game.activePowerups.shrinkUntil = 0;
+  }
+}
+
+function applyPowerup(type) {
+  const now = millis();
+  if (type === "magnet") game.activePowerups.magnetUntil = now + 5000;
+  if (type === "shield") game.runner.shieldCharges = 1;
+  if (type === "double") game.activePowerups.doubleUntil = now + 5000;
+  if (type === "shrink") game.activePowerups.shrinkUntil = now + 5000;
+}
+
+function powerColor(type) {
+  if (type === "magnet") return [100, 185, 255];
+  if (type === "shield") return [120, 255, 140];
+  if (type === "double") return [255, 210, 80];
+  return [200, 120, 255];
+}
+
+function updateScoreAndDifficulty() {
+  const doubleOn = millis() < game.activePowerups.doubleUntil;
+  const addDist = (1 + game.runner.speed * 0.08) * (doubleOn ? 2 : 1);
+  game.stats.distance += addDist;
+  const speedCap = isUwbControlActive() ? 9.2 : 11;
+  const speedStep = isUwbControlActive() ? 0.0012 : 0.0016;
+  game.runner.speed = min(speedCap, game.runner.speed + speedStep);
+
+  const nextSpeedMark = floor(game.stats.distance / 1000);
+  if (nextSpeedMark > 0 && floor((game.stats.distance - addDist) / 1000) < nextSpeedMark) {
+    game.ui.speedUpUntil = millis() + 800;
+    triggerFlash([255, 210, 80], 220, 85);
+    addFloatingText(width * 0.5, height * 0.3, "SPEED UP!", [255, 210, 80]);
+  }
+
+  game.stats.score = game.stats.distance + game.stats.coinPoints;
+  game.stats.displayedScore = lerp(game.stats.displayedScore, game.stats.score, 0.14);
+}
+
+function drawRunnerGameplay(dimmed) {
+  drawRoadDetails();
+  drawSideSpeedLines();
+  drawObstacles();
+  drawCoins();
+  drawPowerups();
+  drawRunnerCharacter();
+  drawZoneHints();
+
+  if (game.state === "countdown") {
+    const remain = 3 - floor((millis() - game.ui.countdownStartMs) / 1000);
+    textAlign(CENTER, CENTER);
+    textStyle(900);
+    textSize(120);
+    fill(255, 230);
+    text(max(1, remain), width * 0.5, height * 0.5);
+  }
+
+  if (game.paused && game.state === "playing") {
+    noStroke();
+    fill(8, 10, 18, 160);
+    rect(0, 0, width, height);
+    fill(255, 235);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(52);
+    text("PAUSED", width * 0.5, height * 0.5);
+  }
+
+  if (dimmed) {
+    noStroke();
+    fill(10, 12, 16, 80);
+    rect(0, 0, width, height);
+  }
+}
+
+function drawRoad() {
+  const road = getRoadBounds();
+  const topY = 0;
+  const bottomY = height;
+  const topInset = road.w * 0.12;
+
+  noStroke();
+  fill(13, 17, 27, 220);
+  quad(road.left + topInset, topY, road.right - topInset, topY, road.right, bottomY, road.left, bottomY);
+
+  stroke(115, 198, 255, 170);
+  strokeWeight(3);
+  line(road.left + topInset, topY, road.left, bottomY);
+  line(road.right - topInset, topY, road.right, bottomY);
+}
+
+function drawRoadDetails() {
+  const road = getRoadBounds();
+  const topInset = road.w * 0.12;
+
+  stroke(235, 245, 255, 165);
+  strokeWeight(3);
+  const segH = 34;
+  const gap = 22;
+  for (let lane = 1; lane <= 2; lane++) {
+    for (let y = -segH; y < height + segH; y += segH + gap) {
+      const yy = y + (game.runner.roadScroll % (segH + gap));
+      const t0 = constrain(yy / max(1, height), 0, 1);
+      const t1 = constrain((yy + segH) / max(1, height), 0, 1);
+      const x0 = lerp(road.left + topInset, road.right - topInset, lane / 3);
+      const x1 = lerp(road.left, road.right, lane / 3);
+      const sx = lerp(x0, x1, t0);
+      const ex = lerp(x0, x1, t1);
+      line(sx, yy, ex, yy + segH);
+    }
+  }
+
+  noFill();
+  stroke(255, 255, 255, 22);
+  strokeWeight(1);
+  for (let y = -40; y < height + 40; y += 40) {
+    const yy = y + (game.runner.roadScroll * 0.65 % 40);
+    line(road.left + 20, yy, road.right - 20, yy);
+  }
+}
+
+function drawSideSpeedLines() {
+  const count = floor(map(game.runner.speed, 4, 11, 10, 26));
+  stroke(120, 175, 255, 70);
+  strokeWeight(2);
+  for (let i = 0; i < count; i++) {
+    const y = (i * 37 + game.runner.roadScroll * 1.5) % (height + 40) - 20;
+    line(24, y, 58, y + 18);
+    line(width - 24, y, width - 58, y + 18);
+  }
+}
+
+function drawRunnerCharacter() {
+  const b = getRunnerBody();
+  const now = millis();
+  const blink = now < game.runner.invincibleUntil && floor(now / 120) % 2 === 0;
+  if (blink) return;
+
+  for (let i = game.runner.trail.length - 1; i >= 0; i--) {
+    const t = game.runner.trail[i];
+    const n = i / max(1, game.runner.trail.length - 1);
+    const a = lerp(0, 110, 1 - n);
+    noStroke();
+    fill(0, 210, 255, a);
+    circle(t.x, t.y + 8, lerp(4, 14, 1 - n));
+  }
+
+  const glowA = 120 + sin(millis() * 0.02) * 30;
+  noStroke();
+  fill(0, 210, 255, glowA * 0.18);
+  ellipse(b.x, b.y, b.w * 2.2, b.h * 1.8);
+
+  push();
+  translate(b.x, b.y);
+  fill(0, 210, 255, 235);
+  stroke(220, 250, 255, 200);
+  strokeWeight(2);
+  beginShape();
+  vertex(0, -b.h * 0.55);
+  vertex(b.w * 0.5, 0);
+  vertex(0, b.h * 0.55);
+  vertex(-b.w * 0.5, 0);
+  endShape(CLOSE);
+  noStroke();
+  fill(255, 210);
+  ellipse(0, -b.h * 0.16, b.w * 0.22, b.h * 0.14);
+  pop();
+
+  if (game.runner.shieldCharges > 0) {
+    noFill();
+    stroke(120, 255, 140, 210);
+    strokeWeight(3);
+    circle(b.x, b.y, max(b.w, b.h) * 1.9);
+  }
+}
+
+function drawObstacles() {
+  const lanes = getLaneCenters();
+  for (const o of game.entities.obstacles) {
+    if (o.type === "wide") {
+      const gapX = lanes[o.gapLane];
+      const laneW = (lanes[2] - lanes[1]) * 0.96;
+      for (let lane = 0; lane < 3; lane++) {
+        if (lane === o.gapLane) continue;
+        const x = lanes[lane];
+        drawObstacleBlock(x, o.y, laneW, o.h, [239, 68, 68]);
+      }
+      noFill();
+      stroke(132, 255, 190, 185);
+      strokeWeight(3);
+      rectMode(CENTER);
+      rect(gapX, o.y, laneW * 0.9, o.h + 7, 6);
+      rectMode(CORNER);
+      continue;
+    }
+
+    const x = lanes[o.lane];
+    if (o.type === "barrier") drawObstacleBlock(x, o.y, o.w, o.h, [239, 68, 68]);
+    if (o.type === "low") drawObstacleBlock(x, o.y, o.w, o.h, [245, 158, 11]);
+    if (o.type === "overhead") {
+      drawObstacleBlock(x, o.y - 16, o.w * 0.92, o.h * 0.9, [174, 120, 255]);
+      noStroke();
+      fill(20, 20, 30, 80);
+      ellipse(x, o.y + 18, o.w * 0.9, 12);
+    }
+  }
+}
+
+function drawObstacleBlock(x, y, w, h, c) {
+  noStroke();
+  fill(c[0], c[1], c[2], 45);
+  rectMode(CENTER);
+  rect(x, y, w * 1.2, h * 1.4, 10);
+  fill(c[0], c[1], c[2], 225);
+  rect(x, y, w, h, 8);
+  stroke(255, 140);
+  strokeWeight(2);
+  line(x - w * 0.42, y - h * 0.2, x + w * 0.42, y - h * 0.2);
+  rectMode(CORNER);
+}
+
+function drawCoins() {
+  const lanes = getLaneCenters();
+  for (const c of game.entities.coins) {
+    const x = lanes[c.lane] + c.xOffset;
+    const bob = sin((millis() + c.y * 8) * 0.015) * 2;
+    noStroke();
+    fill(255, 215, 85, 220);
+    circle(x, c.y + bob, c.r * 2);
+    fill(255, 242, 170, 170);
+    circle(x - 2, c.y + bob - 2, c.r * 0.8);
+  }
+}
+
+function drawPowerups() {
+  const lanes = getLaneCenters();
+  for (const p of game.entities.powerups) {
+    const x = lanes[p.lane];
+    const col = powerColor(p.type);
+    push();
+    translate(x, p.y);
+    rotate(p.rot);
+    noStroke();
+    fill(col[0], col[1], col[2], 215);
+    rectMode(CENTER);
+    rect(0, 0, 30, 18, 9);
+    fill(255, 235);
+    textAlign(CENTER, CENTER);
+    textStyle(900);
+    textSize(10);
+    text(powerSymbol(p.type), 0, 1);
+    rectMode(CORNER);
+    pop();
+  }
+}
+
+function powerSymbol(type) {
+  if (type === "magnet") return "M";
+  if (type === "shield") return "S";
+  if (type === "double") return "2X";
+  return "SH";
+}
+
+function drawZoneHints() {
+  textAlign(LEFT, CENTER);
+  textStyle(700);
+  textSize(16);
+
+  const jumpAlpha = millis() < game.ui.zoneFlashJump ? 255 : 90;
+  fill(120, 210, 255, jumpAlpha);
+  text("JUMP", 18, 84);
+
+  const slideAlpha = millis() < game.ui.zoneFlashSlide ? 255 : 90;
+  fill(255, 190, 120, slideAlpha);
+  text("SLIDE", 18, height - 84);
+}
+
+function drawHUD() {
+  const score = floor(game.stats.displayedScore);
+  textAlign(CENTER, TOP);
+  textStyle(800);
+  textSize(36);
+  fill(240, 248, 255, 235);
+  text(score, width * 0.5, 10);
+
+  textAlign(RIGHT, TOP);
+  textStyle(700);
+  textSize(16);
+  fill(255, 230, 170, 220);
+  text(`Coins ${game.stats.coins}`, width - 16, 16);
+  fill(175, 220, 255, 200);
+  text(`Speed ${game.runner.speed.toFixed(1)}`, width - 16, 38);
+
+  drawLives(16, 18);
+
+  if (game.stats.comboMult > 1) {
+    fill(255, 220, 120, 230);
+    textAlign(CENTER, TOP);
+    textStyle(800);
+    textSize(20);
+    text(`x${game.stats.comboMult} COMBO`, width * 0.5, 56);
+  }
+
+  if (millis() < game.ui.speedUpUntil) {
+    fill(255, 215, 90, 230);
+    textAlign(CENTER, CENTER);
+    textStyle(900);
+    textSize(40);
+    text("SPEED UP!", width * 0.5, height * 0.2);
+  }
+
+  drawActivePowerupHUD();
+}
+
+function drawLives(x, y) {
+  for (let i = 0; i < 5; i++) {
+    const alive = i < game.stats.lives;
+    noStroke();
+    fill(alive ? 132 : 60, alive ? 255 : 70, alive ? 170 : 82, alive ? 220 : 120);
+    circle(x + i * 18, y, 10);
+  }
+}
+
+function drawActivePowerupHUD() {
+  const now = millis();
+  const rows = [];
+  if (now < game.activePowerups.magnetUntil) rows.push({ label: "MAGNET", left: game.activePowerups.magnetUntil - now, total: 5000, color: powerColor("magnet") });
+  if (now < game.activePowerups.doubleUntil) rows.push({ label: "DOUBLE", left: game.activePowerups.doubleUntil - now, total: 5000, color: powerColor("double") });
+  if (now < game.activePowerups.shrinkUntil) rows.push({ label: "SHRINK", left: game.activePowerups.shrinkUntil - now, total: 5000, color: powerColor("shrink") });
+  if (game.runner.shieldCharges > 0) rows.push({ label: "SHIELD", left: 1, total: 1, color: powerColor("shield") });
+
+  let y = 76;
+  for (const r of rows) {
+    noStroke();
+    fill(14, 18, 30, 180);
+    rect(14, y, 152, 18, 6);
+    const pct = constrain(r.left / r.total, 0, 1);
+    fill(r.color[0], r.color[1], r.color[2], 210);
+    rect(14, y, 152 * pct, 18, 6);
+    fill(255, 235);
+    textAlign(LEFT, CENTER);
+    textSize(11);
+    textStyle(700);
+    text(r.label, 20, y + 9);
+    y += 24;
+  }
+}
+
+function drawBackButton() {
+  const rectObj = { x: 10, y: 8, w: 88, h: 24 };
+  const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+  const pHover = getActivePlayers().some((p) => cursorOverlapsRect(p, rectObj));
+  const hover = mouseHover || pHover;
+
+  if (hover) {
+    if (game.input.backHoverMs === 0) game.input.backHoverMs = millis();
+    if ((mouseIsPressed && !game.input.prevMouseDown) || millis() - game.input.backHoverMs > 1000) {
+      game.navigateTo = withRuntimeQuery("game_menu.html");
+    }
+  } else {
+    game.input.backHoverMs = 0;
+  }
+
+  noStroke();
+  fill(10, 10, 15, 150);
+  rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 6);
+  fill(255, hover ? 255 : 130);
+  textAlign(LEFT, CENTER);
+  textStyle(600);
+  textSize(14);
+  text("← MENU", rectObj.x + 10, rectObj.y + 12);
+  if (hover) {
+    stroke(255, 220);
+    line(rectObj.x + 10, rectObj.y + 18, rectObj.x + 62, rectObj.y + 18);
+  }
+}
+
+function pointInRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function cursorOverlapsRect(player, rectObj) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  const nx = constrain(player.screenX, rectObj.x, rectObj.x + rectObj.w);
+  const ny = constrain(player.screenY, rectObj.y, rectObj.y + rectObj.h);
+  return dist(player.screenX, player.screenY, nx, ny) <= CONFIG.CURSOR.size * 0.5;
+}
+
+function keyPressed() {
+  if (key === "d" || key === "D") game.demo.forced = !game.demo.forced;
+  if (key === "Escape") game.navigateTo = withRuntimeQuery("game_menu.html");
+  if (key === "p" || key === "P") {
+    if (game.state === "playing") game.paused = !game.paused;
+  }
+
+  if (key === " " || keyCode === 32) {
+    if (game.state === "start") {
+      game.state = "countdown";
+      game.ui.countdownStartMs = millis();
+      game.ui.startHoldMs = 0;
+      return;
+    }
+    if (game.state === "gameover") {
+      resetRunner(false);
+      return;
+    }
+  }
+}
+
+function mousePressed() {
+  if (game.state === "start") {
+    game.state = "countdown";
+    game.ui.countdownStartMs = millis();
+    game.ui.startHoldMs = 0;
+  }
+}
+
+function drawBackground() {
+  background(8, 10, 16);
+  noStroke();
+  fill(12, 16, 26, 120);
+  rect(0, 0, width, height);
+}
+
+function initializeAmbientParticles() {
+  game.ambientParticles = [];
+  for (let i = 0; i < 50; i++) game.ambientParticles.push(makeAmbientParticle(true));
+}
+
+function makeAmbientParticle(randomY = false) {
+  return {
+    x: random(width),
+    y: randomY ? random(height) : height + random(10, 160),
+    vx: random(-0.2, 0.2),
+    vy: random(-0.6, -0.1),
+    size: random(1, 3),
+    alpha: random(15, 50)
+  };
+}
+
+function drawAmbientParticles() {
+  noStroke();
+  for (const p of game.ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.y < -8) Object.assign(p, makeAmbientParticle(false));
+    if (p.x < -8) p.x = width + 8;
+    if (p.x > width + 8) p.x = -8;
+    fill(255, p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function updatePlayerTrails() {
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    p.trail.unshift({ x: p.screenX, y: p.screenY });
+    if (p.trail.length > CONFIG.CURSOR.trailLength) p.trail.length = CONFIG.CURSOR.trailLength;
+  }
+}
+
+function drawCursors() {
+  for (const p of [game.players.p1, game.players.p2]) {
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    drawCursorTrail(p);
+    drawCursorGlow(p);
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], 220);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size);
+    fill(255, 180);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size * 0.35);
+  }
+}
+
+function drawCursorTrail(player) {
+  const tlen = player.trail.length;
+  for (let i = tlen - 1; i >= 0; i--) {
+    const pt = player.trail[i];
+    const n = i / max(1, tlen - 1);
+    const size = lerp(4, CONFIG.CURSOR.size, 1 - n);
+    const alpha = lerp(0, 180, 1 - n) * 0.35;
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(pt.x, pt.y, size);
+  }
+}
+
+function drawCursorGlow(player) {
+  const layers = 12;
+  const maxR = CONFIG.CURSOR.size * 2.5;
+  for (let i = layers; i >= 1; i--) {
+    const r = map(i, 1, layers, CONFIG.CURSOR.size * 0.5, maxR);
+    const alpha = map(i, 1, layers, 30, 0);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(player.screenX, player.screenY, r);
+  }
+}
+
+function getActivePlayers() {
+  const out = [];
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (p.active && p.screenX !== null && p.screenY !== null) out.push(p);
+  }
+  return out;
+}
+
+function triggerShake(intensity, duration) {
+  game.effects.shake.active = true;
+  game.effects.shake.intensity = intensity;
+  game.effects.shake.duration = duration;
+  game.effects.shake.startMs = millis();
+}
+
+function applyScreenShake() {
+  const s = game.effects.shake;
+  if (!s.active) return;
+  const elapsed = millis() - s.startMs;
+  if (elapsed >= s.duration) {
+    s.active = false;
+    return;
+  }
+  const decay = 1 - elapsed / s.duration;
+  translate(random(-1, 1) * s.intensity * decay, random(-1, 1) * s.intensity * decay);
+}
+
+function triggerFlash(color, duration, alpha = 120) {
+  game.effects.flash.active = true;
+  game.effects.flash.color = [...color];
+  game.effects.flash.duration = duration;
+  game.effects.flash.startMs = millis();
+  game.effects.flash.alpha = alpha;
+}
+
+function drawScreenFlash() {
+  const f = game.effects.flash;
+  if (!f.active) return;
+  const elapsed = millis() - f.startMs;
+  if (elapsed >= f.duration) {
+    f.active = false;
+    return;
+  }
+  const a = map(elapsed, 0, f.duration, f.alpha, 0);
+  noStroke();
+  fill(f.color[0], f.color[1], f.color[2], a);
+  rect(0, 0, width, height);
+}
+
+function emitParticles(x, y, color, count = 12, maxSpeed = 5) {
+  for (let i = 0; i < count; i++) {
+    const ang = random(TWO_PI);
+    const spd = random(0.6, maxSpeed);
+    game.effects.burstParticles.push({
+      x,
+      y,
+      vx: cos(ang) * spd,
+      vy: sin(ang) * spd,
+      size: random(3, 8),
+      alpha: 255,
+      decay: random(4, 8),
+      color: [...color]
+    });
+  }
+}
+
+function drawBurstParticles() {
+  for (let i = game.effects.burstParticles.length - 1; i >= 0; i--) {
+    const p = game.effects.burstParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.99;
+    p.vy += 0.06;
+    p.alpha -= p.decay;
+    p.size *= 0.986;
+    if (p.alpha <= 0 || p.size <= 0.7) {
+      game.effects.burstParticles.splice(i, 1);
+      continue;
+    }
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function addFloatingText(x, y, txt, color = [255, 255, 255]) {
+  game.effects.floatingScores.push({
+    x,
+    y,
+    vy: -1.7,
+    alpha: 255,
+    life: 50,
+    maxLife: 50,
+    text: txt,
+    color
+  });
+}
+
+function drawFloatingScores() {
+  for (let i = game.effects.floatingScores.length - 1; i >= 0; i--) {
+    const f = game.effects.floatingScores[i];
+    f.y += f.vy;
+    f.vy *= 0.94;
+    f.life -= 1;
+    f.alpha = map(f.life, 0, f.maxLife, 0, 255);
+    if (f.life <= 0) {
+      game.effects.floatingScores.splice(i, 1);
+      continue;
+    }
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(24);
+    text(f.text, f.x, f.y);
+  }
+}
+
+function updateEffects() {}
+
+function drawConnectionIndicator() {
+  noStroke();
+  fill(game.ws.connected ? color(34, 197, 94, 240) : color(239, 68, 68, 240));
+  circle(16, 16, 8);
+}
+
+function drawDemoBadge() {
+  if (!game.demo.enabled) return;
+  const w = 62;
+  const h = 24;
+  noStroke();
+  fill(245, 158, 11, 220);
+  rect(width - w - 12, 12, w, h, 6);
+  fill(20, 14, 8, 240);
+  textAlign(CENTER, CENTER);
+  textStyle(800);
+  textSize(12);
+  text("DEMO", width - w * 0.5 - 12, 24);
+}
+
+function withRuntimeQuery(path) {
+  return runtimeQueryString ? `${path}${runtimeQueryString}` : path;
+}
+
+function applyURLOverrides() {
+  const params = new URLSearchParams(window.location.search);
+  runtimeQueryString = window.location.search || "";
+
+  const wsParam = params.get("ws");
+  if (wsParam) CONFIG.WS_URL = wsParam;
+
+  const tag1 = Number(params.get("tag1"));
+  if (Number.isFinite(tag1)) {
+    CONFIG.PLAYER_TAGS.p1 = tag1;
+    game.players.p1.tagId = tag1;
+  }
+  const tag2 = Number(params.get("tag2"));
+  if (Number.isFinite(tag2)) {
+    CONFIG.PLAYER_TAGS.p2 = tag2;
+    game.players.p2.tagId = tag2;
+  }
+}
+
+function connectWebSocket() {
+  if (game.ws.socket) {
+    try { game.ws.socket.close(); } catch (_) {}
+  }
+  const ws = new WebSocket(CONFIG.WS_URL);
+  game.ws.socket = ws;
+
+  ws.onopen = () => { game.ws.connected = true; };
+  ws.onmessage = (evt) => {
+    game.ws.packetCount++;
+    let payload;
+    try {
+      payload = JSON.parse(evt.data);
+    } catch (_) {
+      game.ws.parseErrors++;
+      return;
+    }
+    ingestTagPayload(payload);
+  };
+  ws.onerror = () => { game.ws.connected = false; };
+  ws.onclose = () => {
+    game.ws.connected = false;
+    if (game.ws.reconnectTimer) clearTimeout(game.ws.reconnectTimer);
+    game.ws.reconnectTimer = setTimeout(connectWebSocket, 1000);
+  };
+}
+
+function ingestTagPayload(payload) {
+  const tags = normalizeTags(payload);
+  if (!tags.length) return;
+
+  game.ws.lastDataMs = millis();
+  for (const t of tags) {
+    const tid = Number(t.id ?? t.tagId ?? t.tag_id);
+    const tx = Number(t.x ?? t.posX ?? t.pos_x);
+    const ty = Number(t.y ?? t.posY ?? t.pos_y);
+    if (!Number.isFinite(tid) || !Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+    game.ws.lastTag = { id: tid, x: tx, y: ty, ms: millis() };
+    if (tid === game.players.p1.tagId) updatePlayerFromUWB(game.players.p1, tx, ty);
+    else if (tid === game.players.p2.tagId) updatePlayerFromUWB(game.players.p2, tx, ty);
+  }
+}
+
+function normalizeTags(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.tags)) return payload.tags;
+  if (payload && payload.tag) return [payload.tag];
+  if (payload && (payload.id !== undefined || payload.tagId !== undefined || payload.tag_id !== undefined)) return [payload];
+  return [];
+}
+
+function mapUWBToScreen(x, y, tagId = CONFIG.PLAYER_TAGS.p1) {
+  const shared = readSharedCalibrationBounds(tagId);
+  const b = shared || CONFIG.UWB_BOUNDS;
+  const pad = shared ? 0 : CONFIG.WORLD_PADDING;
+  const px = map(x, b.xMin, b.xMax, pad, width - pad);
+  const py = map(y, b.yMin, b.yMax, height - pad, pad);
+  return { x: constrain(px, 0, width), y: constrain(py, 0, height) };
+}
+
+function updatePlayerFromUWB(player, uwbX, uwbY) {
+  ensurePlayerFilters(player);
+  const mapped = mapUWBToScreen(uwbX, uwbY, player.tagId);
+  const ts = millis() * 0.001;
+  player.screenX = player.filters.x.filter(mapped.x, ts);
+  player.screenY = player.filters.y.filter(mapped.y, ts);
+  player.rawX = uwbX;
+  player.rawY = uwbY;
+  player.active = true;
+  player.lastUpdateMs = millis();
+}
+
+function updateDemoMode() {
+  const noData = millis() - game.ws.lastDataMs > CONFIG.DEMO_TIMEOUT_MS;
+  game.demo.enabled = game.demo.forced || !game.ws.connected || noData;
+  if (!game.demo.enabled) return;
+
+  const p1 = game.players.p1;
+  ensurePlayerFilters(p1);
+  const ts = millis() * 0.001;
+  const mx = constrain(mouseX + random(-3, 3), 0, width);
+  const my = constrain(mouseY + random(-3, 3), 0, height);
+  p1.screenX = p1.filters.x.filter(mx, ts);
+  p1.screenY = p1.filters.y.filter(my, ts);
+  p1.active = true;
+  p1.lastUpdateMs = millis();
+}
+
+function pruneStalePlayers() {
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active) continue;
+    if (game.demo.enabled && key === "p1") continue;
+    if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) p.active = false;
+  }
+}
+
+function renderGameToText() {
+  return JSON.stringify({
+    coordinate_system: "origin=(top-left), +x right, +y down, pixels",
+    page: "runner",
+    state: game.state,
+    paused: game.paused,
+    score: floor(game.stats.score),
+    distance: floor(game.stats.distance),
+    coins: game.stats.coins,
+    lives: game.stats.lives,
+    speed: Number(game.runner.speed.toFixed(2)),
+    lane: game.runner.lane,
+    action: game.runner.actionZone,
+    obstacle_count: game.entities.obstacles.length,
+    coin_count: game.entities.coins.length,
+    powerup_count: game.entities.powerups.length,
+    websocket_connected: game.ws.connected,
+    demo_enabled: game.demo.enabled,
+    players: getActivePlayers().map((p) => ({ label: p.label, x: round(p.screenX), y: round(p.screenY) }))
+  });
+}
+
+function exposeAutomationHooks() {
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms = 16) => new Promise((resolve) => setTimeout(resolve, max(0, ms)));
+}
+
+class LowPassFilter {
+  constructor(alpha, initVal = 0) {
+    this.y = initVal;
+    this.s = initVal;
+    this.initialized = false;
+    this.setAlpha(alpha);
+  }
+  setAlpha(alpha) { this.alpha = alpha; }
+  filter(value) {
+    let result;
+    if (this.initialized) result = this.alpha * value + (1 - this.alpha) * this.s;
+    else { result = value; this.initialized = true; }
+    this.y = value;
+    this.s = result;
+    return result;
+  }
+  hasLastRawValue() { return this.initialized; }
+  lastRawValue() { return this.y; }
+  reset(value = 0) {
+    this.y = value;
+    this.s = value;
+    this.initialized = false;
+  }
+}
+
+class OneEuroFilter {
+  constructor(freq, minCutoff = 1.0, beta = 0.0, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.x = new LowPassFilter(this.alpha(minCutoff));
+    this.dx = new LowPassFilter(this.alpha(dCutoff));
+    this.lastTime = null;
+  }
+  alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+  filter(value, timestamp = null) {
+    if (this.lastTime !== null && timestamp !== null) {
+      const dt = timestamp - this.lastTime;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+    const dValue = this.x.hasLastRawValue() ? (value - this.x.lastRawValue()) * this.freq : 0.0;
+    const edValue = this.dx.filter(dValue);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue);
+    this.x.setAlpha(this.alpha(cutoff));
+    return this.x.filter(value);
+  }
+  reset(value = 0) {
+    this.x.reset(value);
+    this.dx.reset(0);
+    this.lastTime = null;
+  }
+}
+</script>
+</body>
+</html>

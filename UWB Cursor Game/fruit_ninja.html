@@ -1,0 +1,1161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UWB Fruit Ninja</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: rgb(10, 10, 15);
+      font-family: "Outfit", sans-serif;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script>
+const CONFIG = {
+  WS_URL: "ws://localhost:8765",
+  UWB_BOUNDS: { xMin: 0, xMax: 4, yMin: 0, yMax: 3 },
+  PLAYER_TAGS: { p1: 1, p2: 2 },
+  CURSOR: {
+    size: 24,
+    trailLength: 12,
+    p1Color: [0, 210, 255],
+    p2Color: [255, 50, 200]
+  },
+  DEMO_TIMEOUT_MS: 3000,
+  WORLD_PADDING: 100,
+  PLAYER_ACTIVE_TIMEOUT_MS: 1200,
+  FILTER: {
+    minCutoff: 1.0,
+    beta: 0.007,
+    dCutoff: 1.0,
+    freq: 20
+  }
+};
+
+const FRUIT_TYPES = [
+  { name: "apple", color: [255, 88, 102], r: 26 },
+  { name: "orange", color: [255, 162, 74], r: 24 },
+  { name: "melon", color: [132, 224, 148], r: 30 },
+  { name: "berry", color: [187, 136, 255], r: 22 },
+  { name: "lemon", color: [255, 225, 96], r: 23 }
+];
+
+const game = {
+  state: "start",
+  players: {
+    p1: createPlayer(CONFIG.PLAYER_TAGS.p1, "P1", CONFIG.CURSOR.p1Color),
+    p2: createPlayer(CONFIG.PLAYER_TAGS.p2, "P2", CONFIG.CURSOR.p2Color)
+  },
+  ws: {
+    socket: null,
+    connected: false,
+    reconnectTimer: null,
+    lastDataMs: 0,
+    packetCount: 0,
+    parseErrors: 0,
+    lastTag: null
+  },
+  demo: {
+    enabled: true,
+    forced: false
+  },
+  ambientParticles: [],
+  effects: {
+    flash: { active: false, startMs: 0, duration: 0, color: [255, 255, 255], alpha: 0 },
+    shake: { active: false, startMs: 0, duration: 0, intensity: 0 },
+    burstParticles: [],
+    floatingScores: [],
+    fragments: []
+  },
+  input: {
+    prevMouseDown: false,
+    backHoverMs: 0
+  },
+  ninja: {
+    objects: [],
+    nextId: 1,
+    slashTrail: [],
+    prevPointer: null,
+    score: 0,
+    displayedScore: 0,
+    bestScore: 0,
+    lives: 3,
+    combo: 0,
+    comboUntil: 0,
+    lastSliceMs: 0,
+    spawnAtMs: 0,
+    slices: 0,
+    misses: 0,
+    bombsHit: 0,
+    bombCooldownUntil: 0
+  },
+  navigateTo: ""
+};
+let runtimeQueryString = "";
+const SHARED_CALIBRATION_KEY = "uwb_room_calibration_v1";
+
+function isValidBounds(bounds) {
+  if (!bounds) return false;
+  const xMin = Number(bounds.xMin);
+  const xMax = Number(bounds.xMax);
+  const yMin = Number(bounds.yMin);
+  const yMax = Number(bounds.yMax);
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax) && xMax > xMin && yMax > yMin;
+}
+
+function readSharedCalibrationBounds(tagId = CONFIG.PLAYER_TAGS.p1) {
+  try {
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const byTag = payload && payload.tags ? payload.tags[String(tagId)] : null;
+    if (isValidBounds(byTag)) return byTag;
+    if (isValidBounds(payload && payload.global)) return payload.global;
+  } catch (err) {}
+  return null;
+}
+
+function resolveUwbBoundsForTag(tagId = CONFIG.PLAYER_TAGS.p1) {
+  return readSharedCalibrationBounds(tagId) || CONFIG.UWB_BOUNDS;
+}
+
+function createPlayer(tagId, label, color) {
+  return {
+    tagId,
+    label,
+    color,
+    active: false,
+    screenX: null,
+    screenY: null,
+    rawX: null,
+    rawY: null,
+    lastUpdateMs: 0,
+    trail: [],
+    filters: null
+  };
+}
+
+function ensurePlayerFilters(player) {
+  if (player.filters) return;
+  player.filters = {
+    x: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff),
+    y: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff)
+  };
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  textFont("Outfit");
+  applyURLOverrides();
+  initializeAmbientParticles();
+  connectWebSocket();
+  resetNinja(true);
+  exposeAutomationHooks();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  initializeAmbientParticles();
+}
+
+function resetNinja(toStart = false) {
+  game.ninja.objects = [];
+  game.ninja.nextId = 1;
+  game.ninja.slashTrail = [];
+  game.ninja.prevPointer = null;
+  game.ninja.score = 0;
+  game.ninja.displayedScore = 0;
+  game.ninja.lives = 4;
+  game.ninja.combo = 0;
+  game.ninja.comboUntil = 0;
+  game.ninja.lastSliceMs = 0;
+  game.ninja.spawnAtMs = millis() + 800;
+  game.ninja.slices = 0;
+  game.ninja.misses = 0;
+  game.ninja.bombsHit = 0;
+  game.ninja.bombCooldownUntil = 0;
+  game.state = toStart ? "start" : "playing";
+}
+
+function draw() {
+  updateDemoMode();
+  pruneStalePlayers();
+  updatePlayerTrails();
+  updateEffects();
+
+  drawBackground();
+  drawAmbientParticles();
+
+  push();
+  applyScreenShake();
+
+  if (game.state === "start") {
+    drawStartScreen();
+  } else {
+    if (game.state === "playing") updateFruitNinjaGameplay();
+    drawNinjaObjects();
+    drawSlashTrail();
+    if (game.state === "gameover") drawGameOverOverlay();
+  }
+
+  drawFragments();
+  drawBurstParticles();
+  drawFloatingScores();
+  drawCursors();
+  pop();
+
+  drawHUD();
+  drawConnectionIndicator();
+  drawDemoBadge();
+  drawScreenFlash();
+  drawBackButton();
+
+  if (game.navigateTo) {
+    const url = game.navigateTo;
+    game.navigateTo = "";
+    window.location.href = url;
+  }
+
+  game.input.prevMouseDown = mouseIsPressed;
+}
+
+function updateFruitNinjaGameplay() {
+  const n = game.ninja;
+  const now = millis();
+
+  if (now >= n.spawnAtMs) {
+    spawnNinjaWave();
+    n.spawnAtMs = now + nextSpawnIntervalMs();
+  }
+
+  updateSlashDetection();
+
+  let fruitsSlicedThisFrame = 0;
+  const seg = currentSlashSegment();
+  if (seg) {
+    for (const obj of n.objects) {
+      if (!obj.alive) continue;
+      if (obj.justSpawn) continue;
+      const hitPad = isUwbControlActive() ? 14 : 6;
+      if (segmentCircleHit(seg.x1, seg.y1, seg.x2, seg.y2, obj.x, obj.y, obj.r + hitPad)) {
+        if (obj.type === "bomb") {
+          hitBomb(obj);
+        } else {
+          fruitsSlicedThisFrame++;
+          sliceFruit(obj);
+        }
+      }
+    }
+  }
+
+  if (fruitsSlicedThisFrame > 0) {
+    const dt = now - n.lastSliceMs;
+    if (dt <= 360) n.combo++;
+    else n.combo = 1;
+    n.lastSliceMs = now;
+    n.comboUntil = now + 780;
+
+    let comboBonus = min(4, n.combo);
+    if (fruitsSlicedThisFrame >= 2) comboBonus += 1;
+    const pts = 10 * fruitsSlicedThisFrame * comboBonus;
+    n.score += pts;
+    n.slices += fruitsSlicedThisFrame;
+    addFloatingText(seg.x2, seg.y2 - 12, `+${pts}`, [132, 255, 180]);
+  }
+
+  for (let i = n.objects.length - 1; i >= 0; i--) {
+    const obj = n.objects[i];
+    if (!obj.alive) {
+      n.objects.splice(i, 1);
+      continue;
+    }
+
+    obj.x += obj.vx;
+    obj.y += obj.vy;
+    obj.vy += 0.28;
+    obj.rot += obj.vr;
+    obj.justSpawn = false;
+
+    if (obj.y - obj.r > height + 50) {
+      if (obj.type === "fruit") {
+        missFruit(obj);
+      }
+      n.objects.splice(i, 1);
+    }
+  }
+
+  n.displayedScore = lerp(n.displayedScore, n.score, 0.16);
+
+  if (n.comboUntil < now) n.combo = 0;
+}
+
+function nextSpawnIntervalMs() {
+  const score = game.ninja.score;
+  const t = constrain(score / 3500, 0, 1);
+  const base = random(880, 1180) - t * 320;
+  return isUwbControlActive() ? base + 220 : base;
+}
+
+function spawnNinjaWave() {
+  const n = game.ninja;
+  const score = n.score;
+  const t = constrain(score / 4000, 0, 1);
+  const count = random() < lerp(0.18, isUwbControlActive() ? 0.34 : 0.44, t) ? 2 : 1;
+  const bombChance = lerp(0.08, isUwbControlActive() ? 0.17 : 0.24, t);
+
+  const spawnXs = [];
+  for (let i = 0; i < count; i++) {
+    let x = random(100, width - 100);
+    for (let tries = 0; tries < 6; tries++) {
+      if (spawnXs.every((sx) => abs(sx - x) > 90)) break;
+      x = random(100, width - 100);
+    }
+    spawnXs.push(x);
+  }
+
+  let bombsInWave = 0;
+  for (let i = 0; i < count; i++) {
+    const x = spawnXs[i];
+    const fruitDef = random(FRUIT_TYPES);
+    const isBomb = random() < bombChance && !(count === 1 && random() < 0.55);
+    if (isBomb) bombsInWave++;
+
+    const obj = {
+      id: n.nextId++,
+      type: isBomb ? "bomb" : "fruit",
+      name: isBomb ? "bomb" : fruitDef.name,
+      color: isBomb ? [239, 68, 68] : fruitDef.color,
+      x,
+      y: height + 40,
+      vx: random(-2.2, 2.2),
+      vy: -random(10.5, 13.8) * (1 + t * 0.12),
+      r: isBomb ? 24 : fruitDef.r + random(-2, 2),
+      rot: random(TWO_PI),
+      vr: random(-0.08, 0.08),
+      bornMs: millis(),
+      alive: true,
+      justSpawn: true
+    };
+
+    n.objects.push(obj);
+  }
+
+  if (bombsInWave >= count) {
+    const last = n.objects[n.objects.length - 1];
+    if (last) {
+      const fruitDef = random(FRUIT_TYPES);
+      last.type = "fruit";
+      last.name = fruitDef.name;
+      last.color = fruitDef.color;
+      last.r = fruitDef.r;
+    }
+  }
+}
+
+function updateSlashDetection() {
+  const pt = getPointerPoint();
+  const n = game.ninja;
+
+  if (!n.prevPointer) {
+    n.prevPointer = { x: pt.x, y: pt.y };
+    n.slashTrail.unshift({ x: pt.x, y: pt.y, ms: millis() });
+    return;
+  }
+
+  const d = dist(pt.x, pt.y, n.prevPointer.x, n.prevPointer.y);
+  const minMove = isUwbControlActive() ? 3 : 4;
+  if (d > minMove) {
+    n.slashTrail.unshift({ x: pt.x, y: pt.y, ms: millis() });
+  } else {
+    n.slashTrail.unshift({ x: lerp(pt.x, n.prevPointer.x, 0.5), y: lerp(pt.y, n.prevPointer.y, 0.5), ms: millis() });
+  }
+
+  n.prevPointer = { x: pt.x, y: pt.y };
+  if (n.slashTrail.length > 18) n.slashTrail.length = 18;
+}
+
+function currentSlashSegment() {
+  const trail = game.ninja.slashTrail;
+  if (trail.length < 2) return null;
+  const a = trail[1];
+  const b = trail[0];
+  const now = millis();
+  const freshnessMs = isUwbControlActive() ? 125 : 90;
+  if (now - a.ms > freshnessMs || now - b.ms > freshnessMs) return null;
+  const d = dist(a.x, a.y, b.x, b.y);
+  if (d < (isUwbControlActive() ? 5 : 7)) return null;
+  return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+}
+
+function sliceFruit(obj) {
+  obj.alive = false;
+  emitParticles(obj.x, obj.y, obj.color, 16, 4.6);
+  emitFruitFragments(obj, false);
+}
+
+function hitBomb(obj) {
+  if (millis() < game.ninja.bombCooldownUntil) {
+    obj.alive = false;
+    emitFruitFragments(obj, true);
+    return;
+  }
+  obj.alive = false;
+  game.ninja.bombsHit++;
+  game.ninja.lives--;
+  game.ninja.bombCooldownUntil = millis() + 260;
+  triggerFlash([239, 68, 68], 220, 120);
+  triggerShake(9, 260);
+  emitParticles(obj.x, obj.y, [255, 120, 120], 22, 5.2);
+  emitFruitFragments(obj, true);
+  addFloatingText(obj.x, obj.y, "BOMB!", [255, 120, 120]);
+  game.ninja.combo = 0;
+  if (game.ninja.lives <= 0) {
+    game.state = "gameover";
+    game.ninja.bestScore = max(game.ninja.bestScore, game.ninja.score);
+  }
+}
+
+function missFruit(obj) {
+  game.ninja.misses++;
+  const uwb = isUwbControlActive();
+  const loseLife = !uwb || game.ninja.misses % 2 === 0;
+  if (loseLife) game.ninja.lives--;
+  game.ninja.combo = 0;
+  triggerFlash([255, 120, 120], 180, 85);
+  addFloatingText(obj.x, height - 60, loseLife ? "MISS" : "GRAZE", [255, 150, 150]);
+  if (game.ninja.lives <= 0) {
+    game.state = "gameover";
+    game.ninja.bestScore = max(game.ninja.bestScore, game.ninja.score);
+  }
+}
+
+function emitFruitFragments(obj, bomb = false) {
+  const pieces = bomb ? 14 : 8;
+  for (let i = 0; i < pieces; i++) {
+    game.effects.fragments.push({
+      x: obj.x,
+      y: obj.y,
+      vx: random(-3.4, 3.4),
+      vy: random(-3.0, 2.6),
+      w: random(6, bomb ? 14 : 12),
+      h: random(4, bomb ? 10 : 8),
+      rot: random(TWO_PI),
+      vr: random(-0.11, 0.11),
+      alpha: 255,
+      color: bomb ? [255, 120, 120] : [...obj.color]
+    });
+  }
+}
+
+function drawNinjaObjects() {
+  for (const obj of game.ninja.objects) {
+    if (!obj.alive) continue;
+    if (obj.type === "bomb") drawBomb(obj);
+    else drawFruit(obj);
+  }
+}
+
+function drawFruit(obj) {
+  noStroke();
+  fill(0, 0, 0, 42);
+  ellipse(obj.x, obj.y + obj.r * 0.9, obj.r * 1.55, obj.r * 0.45);
+
+  push();
+  translate(obj.x, obj.y);
+  rotate(obj.rot);
+
+  const c = obj.color;
+  stroke(max(0, c[0] - 26), max(0, c[1] - 26), max(0, c[2] - 26), 220);
+  strokeWeight(2);
+  fill(c[0], c[1], c[2], 235);
+  circle(0, 0, obj.r * 2);
+
+  noStroke();
+  fill(255, 255, 255, 90);
+  ellipse(-obj.r * 0.24, -obj.r * 0.2, obj.r * 0.7, obj.r * 0.46);
+  pop();
+}
+
+function drawBomb(obj) {
+  noStroke();
+  fill(255, 80, 80, 44);
+  circle(obj.x, obj.y, obj.r * 2.6);
+
+  push();
+  translate(obj.x, obj.y);
+  rotate(obj.rot);
+  fill(239, 68, 68, 225);
+  stroke(40, 14, 16, 210);
+  strokeWeight(2);
+  circle(0, 0, obj.r * 2);
+  stroke(255, 210);
+  strokeWeight(2.4);
+  line(-obj.r * 0.4, -obj.r * 0.4, obj.r * 0.4, obj.r * 0.4);
+  line(obj.r * 0.4, -obj.r * 0.4, -obj.r * 0.4, obj.r * 0.4);
+  noStroke();
+  fill(255, 200, 120, 220);
+  rect(-2, -obj.r - 8, 4, 10, 2);
+  pop();
+}
+
+function drawSlashTrail() {
+  const trail = game.ninja.slashTrail;
+  if (trail.length < 2) return;
+
+  for (let i = 0; i < trail.length - 1; i++) {
+    const a = trail[i];
+    const b = trail[i + 1];
+    const t = i / max(1, trail.length - 2);
+    const alpha = lerp(220, 0, t);
+    stroke(120, 240, 255, alpha);
+    strokeWeight(lerp(5, 1, t));
+    line(a.x, a.y, b.x, b.y);
+  }
+}
+
+function drawStartScreen() {
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(min(84, width * 0.1));
+  fill(255, 238);
+  text("FRUIT NINJA", width * 0.5, height * 0.24);
+
+  textStyle(500);
+  textSize(22);
+  fill(220, 230, 255, 190);
+  text("Slice fruits. Avoid bombs.", width * 0.5, height * 0.36);
+  text("Missed fruit costs a life.", width * 0.5, height * 0.41);
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 110, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(28);
+  text("Press SPACE to start", width * 0.5, height * 0.53);
+
+  drawFruitRowPreview();
+}
+
+function drawFruitRowPreview() {
+  const gap = 90;
+  const y = height * 0.7;
+  const startX = width * 0.5 - gap * 2;
+  for (let i = 0; i < FRUIT_TYPES.length; i++) {
+    const f = FRUIT_TYPES[i];
+    drawFruit({ x: startX + i * gap, y, r: f.r * 0.65, color: f.color, rot: 0 });
+  }
+  drawBomb({ x: width * 0.5 + gap * 2.7, y, r: 16, rot: 0 });
+}
+
+function drawGameOverOverlay() {
+  noStroke();
+  fill(8, 10, 15, 180);
+  rect(0, 0, width, height);
+
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(74);
+  fill(255, 235);
+  text("GAME OVER", width * 0.5, height * 0.36);
+
+  textStyle(700);
+  textSize(30);
+  fill(255, 220, 120, 220);
+  text(`Score ${floor(game.ninja.score)}`, width * 0.5, height * 0.46);
+
+  textStyle(500);
+  textSize(18);
+  fill(225, 235, 255, 180);
+  text(`Slices ${game.ninja.slices}   Misses ${game.ninja.misses}   Bombs ${game.ninja.bombsHit}`,
+    width * 0.5, height * 0.53);
+  text(`Best ${floor(max(game.ninja.bestScore, game.ninja.score))}`, width * 0.5, height * 0.57);
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 100, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(25);
+  text("Press SPACE to retry", width * 0.5, height * 0.63);
+}
+
+function drawHUD() {
+  if (game.state === "start") return;
+
+  game.ninja.displayedScore = lerp(game.ninja.displayedScore, game.ninja.score, 0.15);
+
+  textAlign(CENTER, TOP);
+  textStyle(900);
+  textSize(34);
+  fill(245, 250, 255, 235);
+  text(floor(game.ninja.displayedScore), width * 0.5, 14);
+
+  drawLives();
+
+  textAlign(RIGHT, TOP);
+  textStyle(700);
+  textSize(14);
+  fill(220, 235, 255, 200);
+  text(`BEST ${floor(max(game.ninja.bestScore, game.ninja.score))}`, width - 14, 16);
+
+  if (game.ninja.combo > 1 && game.ninja.comboUntil > millis()) {
+    textAlign(CENTER, TOP);
+    textStyle(800);
+    textSize(22);
+    fill(255, 218, 120, 235);
+    text(`COMBO x${game.ninja.combo}`, width * 0.5, 56);
+  }
+}
+
+function drawLives() {
+  for (let i = 0; i < 3; i++) {
+    const alive = i < game.ninja.lives;
+    noStroke();
+    fill(alive ? 255 : 70, alive ? 130 : 70, alive ? 160 : 85, alive ? 235 : 120);
+    circle(24 + i * 18, 24, 11);
+  }
+}
+
+function drawBackButton() {
+  const rectObj = { x: 10, y: 44, w: 88, h: 24 };
+  const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+  const pHover = getActivePlayers().some((p) => cursorOverlapsRect(p, rectObj));
+  const hover = mouseHover || pHover;
+
+  if (hover) {
+    if (game.input.backHoverMs === 0) game.input.backHoverMs = millis();
+    if ((mouseIsPressed && !game.input.prevMouseDown) || millis() - game.input.backHoverMs > 1000) {
+      game.navigateTo = withRuntimeQuery("game_menu.html");
+    }
+  } else {
+    game.input.backHoverMs = 0;
+  }
+
+  noStroke();
+  fill(10, 10, 15, 150);
+  rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 6);
+  fill(255, hover ? 255 : 130);
+  textAlign(LEFT, CENTER);
+  textStyle(600);
+  textSize(14);
+  text("← MENU", rectObj.x + 10, rectObj.y + 12);
+  if (hover) {
+    stroke(255, 220);
+    line(rectObj.x + 10, rectObj.y + 18, rectObj.x + 62, rectObj.y + 18);
+  }
+}
+
+function pointInRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function cursorOverlapsRect(player, rectObj) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  const nx = constrain(player.screenX, rectObj.x, rectObj.x + rectObj.w);
+  const ny = constrain(player.screenY, rectObj.y, rectObj.y + rectObj.h);
+  return dist(player.screenX, player.screenY, nx, ny) <= CONFIG.CURSOR.size * 0.5;
+}
+
+function isUwbControlActive() {
+  const p = game.players.p1;
+  return !game.demo.enabled && p.active && p.screenX !== null && p.screenY !== null;
+}
+
+function getPointerPoint() {
+  const p = game.players.p1;
+  if (p.active && p.screenX !== null && p.screenY !== null) {
+    return { x: p.screenX, y: p.screenY };
+  }
+  return { x: mouseX, y: mouseY };
+}
+
+function keyPressed() {
+  if (key === "d" || key === "D") game.demo.forced = !game.demo.forced;
+  if (key === "Escape") game.navigateTo = withRuntimeQuery("game_menu.html");
+
+  if (key === " " || keyCode === 32) {
+    if (game.state === "start") {
+      resetNinja(false);
+      return;
+    }
+    if (game.state === "gameover") {
+      resetNinja(false);
+    }
+  }
+}
+
+function mousePressed() {
+  if (game.state === "start") {
+    resetNinja(false);
+  }
+}
+
+function segmentCircleHit(x1, y1, x2, y2, cx, cy, cr) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 0.0001) return dist(x1, y1, cx, cy) <= cr;
+  const t = constrain(((cx - x1) * dx + (cy - y1) * dy) / len2, 0, 1);
+  const px = x1 + dx * t;
+  const py = y1 + dy * t;
+  return dist(px, py, cx, cy) <= cr;
+}
+
+function drawBackground() {
+  background(10, 10, 16);
+  noStroke();
+  fill(26, 18, 44, 80);
+  circle(width * 0.2, height * 0.2, 320);
+  fill(20, 40, 62, 75);
+  circle(width * 0.78, height * 0.26, 280);
+  fill(18, 24, 46, 80);
+  circle(width * 0.5, height * 0.84, 420);
+}
+
+function initializeAmbientParticles() {
+  game.ambientParticles = [];
+  for (let i = 0; i < 50; i++) game.ambientParticles.push(makeAmbientParticle(true));
+}
+
+function makeAmbientParticle(randomY = false) {
+  return {
+    x: random(width),
+    y: randomY ? random(height) : height + random(10, 160),
+    vx: random(-0.2, 0.2),
+    vy: random(-0.6, -0.1),
+    size: random(1, 3),
+    alpha: random(15, 50)
+  };
+}
+
+function drawAmbientParticles() {
+  noStroke();
+  for (const p of game.ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.y < -8) Object.assign(p, makeAmbientParticle(false));
+    if (p.x < -8) p.x = width + 8;
+    if (p.x > width + 8) p.x = -8;
+    fill(255, p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function updatePlayerTrails() {
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    p.trail.unshift({ x: p.screenX, y: p.screenY });
+    if (p.trail.length > CONFIG.CURSOR.trailLength) p.trail.length = CONFIG.CURSOR.trailLength;
+  }
+}
+
+function drawCursors() {
+  for (const p of [game.players.p1, game.players.p2]) {
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    drawCursorTrail(p);
+    drawCursorGlow(p);
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], 220);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size);
+    fill(255, 180);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size * 0.35);
+  }
+}
+
+function drawCursorTrail(player) {
+  const tlen = player.trail.length;
+  for (let i = tlen - 1; i >= 0; i--) {
+    const pt = player.trail[i];
+    const n = i / max(1, tlen - 1);
+    const size = lerp(4, CONFIG.CURSOR.size, 1 - n);
+    const alpha = lerp(0, 180, 1 - n) * 0.35;
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(pt.x, pt.y, size);
+  }
+}
+
+function drawCursorGlow(player) {
+  const layers = 12;
+  const maxR = CONFIG.CURSOR.size * 2.5;
+  for (let i = layers; i >= 1; i--) {
+    const r = map(i, 1, layers, CONFIG.CURSOR.size * 0.5, maxR);
+    const alpha = map(i, 1, layers, 30, 0);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(player.screenX, player.screenY, r);
+  }
+}
+
+function getActivePlayers() {
+  const out = [];
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (p.active && p.screenX !== null && p.screenY !== null) out.push(p);
+  }
+  return out;
+}
+
+function drawFragments() {
+  for (let i = game.effects.fragments.length - 1; i >= 0; i--) {
+    const f = game.effects.fragments[i];
+    f.x += f.vx;
+    f.y += f.vy;
+    f.vy += 0.08;
+    f.alpha -= 8;
+    f.rot += f.vr;
+    if (f.alpha <= 0) {
+      game.effects.fragments.splice(i, 1);
+      continue;
+    }
+    push();
+    translate(f.x, f.y);
+    rotate(f.rot);
+    noStroke();
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    rect(-f.w * 0.5, -f.h * 0.5, f.w, f.h, 3);
+    pop();
+  }
+}
+
+function triggerShake(intensity, duration) {
+  game.effects.shake.active = true;
+  game.effects.shake.intensity = intensity;
+  game.effects.shake.duration = duration;
+  game.effects.shake.startMs = millis();
+}
+
+function applyScreenShake() {
+  const s = game.effects.shake;
+  if (!s.active) return;
+  const elapsed = millis() - s.startMs;
+  if (elapsed >= s.duration) {
+    s.active = false;
+    return;
+  }
+  const decay = 1 - elapsed / s.duration;
+  translate(random(-1, 1) * s.intensity * decay, random(-1, 1) * s.intensity * decay);
+}
+
+function triggerFlash(color, duration, alpha = 120) {
+  game.effects.flash.active = true;
+  game.effects.flash.color = [...color];
+  game.effects.flash.duration = duration;
+  game.effects.flash.startMs = millis();
+  game.effects.flash.alpha = alpha;
+}
+
+function drawScreenFlash() {
+  const f = game.effects.flash;
+  if (!f.active) return;
+  const elapsed = millis() - f.startMs;
+  if (elapsed >= f.duration) {
+    f.active = false;
+    return;
+  }
+  const a = map(elapsed, 0, f.duration, f.alpha, 0);
+  noStroke();
+  fill(f.color[0], f.color[1], f.color[2], a);
+  rect(0, 0, width, height);
+}
+
+function emitParticles(x, y, color, count = 12, maxSpeed = 5) {
+  for (let i = 0; i < count; i++) {
+    const ang = random(TWO_PI);
+    const spd = random(0.6, maxSpeed);
+    game.effects.burstParticles.push({
+      x,
+      y,
+      vx: cos(ang) * spd,
+      vy: sin(ang) * spd,
+      size: random(3, 8),
+      alpha: 255,
+      decay: random(4, 8),
+      color: [...color]
+    });
+  }
+}
+
+function drawBurstParticles() {
+  for (let i = game.effects.burstParticles.length - 1; i >= 0; i--) {
+    const p = game.effects.burstParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.99;
+    p.vy += 0.06;
+    p.alpha -= p.decay;
+    p.size *= 0.986;
+    if (p.alpha <= 0 || p.size <= 0.7) {
+      game.effects.burstParticles.splice(i, 1);
+      continue;
+    }
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function addFloatingText(x, y, txt, color = [255, 255, 255]) {
+  game.effects.floatingScores.push({
+    x,
+    y,
+    vy: -1.7,
+    alpha: 255,
+    life: 50,
+    maxLife: 50,
+    text: txt,
+    color
+  });
+}
+
+function drawFloatingScores() {
+  for (let i = game.effects.floatingScores.length - 1; i >= 0; i--) {
+    const f = game.effects.floatingScores[i];
+    f.y += f.vy;
+    f.vy *= 0.94;
+    f.life -= 1;
+    f.alpha = map(f.life, 0, f.maxLife, 0, 255);
+    if (f.life <= 0) {
+      game.effects.floatingScores.splice(i, 1);
+      continue;
+    }
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(24);
+    text(f.text, f.x, f.y);
+  }
+}
+
+function updateEffects() {}
+
+function drawConnectionIndicator() {
+  noStroke();
+  fill(game.ws.connected ? color(34, 197, 94, 240) : color(239, 68, 68, 240));
+  circle(16, 16, 8);
+}
+
+function drawDemoBadge() {
+  if (!game.demo.enabled) return;
+  const w = 62;
+  const h = 24;
+  noStroke();
+  fill(245, 158, 11, 220);
+  rect(width - w - 12, 12, w, h, 6);
+  fill(20, 14, 8, 240);
+  textAlign(CENTER, CENTER);
+  textStyle(800);
+  textSize(12);
+  text("DEMO", width - w * 0.5 - 12, 24);
+}
+
+function withRuntimeQuery(path) {
+  return runtimeQueryString ? `${path}${runtimeQueryString}` : path;
+}
+
+function applyURLOverrides() {
+  const params = new URLSearchParams(window.location.search);
+  runtimeQueryString = window.location.search || "";
+
+  const wsParam = params.get("ws");
+  if (wsParam) CONFIG.WS_URL = wsParam;
+
+  const tag1 = Number(params.get("tag1"));
+  if (Number.isFinite(tag1)) {
+    CONFIG.PLAYER_TAGS.p1 = tag1;
+    game.players.p1.tagId = tag1;
+  }
+  const tag2 = Number(params.get("tag2"));
+  if (Number.isFinite(tag2)) {
+    CONFIG.PLAYER_TAGS.p2 = tag2;
+    game.players.p2.tagId = tag2;
+  }
+}
+
+function connectWebSocket() {
+  if (game.ws.socket) {
+    try { game.ws.socket.close(); } catch (_) {}
+  }
+  const ws = new WebSocket(CONFIG.WS_URL);
+  game.ws.socket = ws;
+  ws.onopen = () => { game.ws.connected = true; };
+  ws.onmessage = (evt) => {
+    game.ws.packetCount++;
+    let payload;
+    try {
+      payload = JSON.parse(evt.data);
+    } catch (_) {
+      game.ws.parseErrors++;
+      return;
+    }
+    ingestTagPayload(payload);
+  };
+  ws.onerror = () => { game.ws.connected = false; };
+  ws.onclose = () => {
+    game.ws.connected = false;
+    if (game.ws.reconnectTimer) clearTimeout(game.ws.reconnectTimer);
+    game.ws.reconnectTimer = setTimeout(connectWebSocket, 1000);
+  };
+}
+
+function ingestTagPayload(payload) {
+  const tags = normalizeTags(payload);
+  if (!tags.length) return;
+
+  game.ws.lastDataMs = millis();
+  for (const t of tags) {
+    const tid = Number(t.id ?? t.tagId ?? t.tag_id);
+    const tx = Number(t.x ?? t.posX ?? t.pos_x);
+    const ty = Number(t.y ?? t.posY ?? t.pos_y);
+    if (!Number.isFinite(tid) || !Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+    game.ws.lastTag = { id: tid, x: tx, y: ty, ms: millis() };
+    if (tid === game.players.p1.tagId) updatePlayerFromUWB(game.players.p1, tx, ty);
+    else if (tid === game.players.p2.tagId) updatePlayerFromUWB(game.players.p2, tx, ty);
+  }
+}
+
+function normalizeTags(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.tags)) return payload.tags;
+  if (payload && payload.tag) return [payload.tag];
+  if (payload && (payload.id !== undefined || payload.tagId !== undefined || payload.tag_id !== undefined)) return [payload];
+  return [];
+}
+
+function mapUWBToScreen(x, y, tagId = CONFIG.PLAYER_TAGS.p1) {
+  const shared = readSharedCalibrationBounds(tagId);
+  const b = shared || CONFIG.UWB_BOUNDS;
+  const pad = shared ? 0 : CONFIG.WORLD_PADDING;
+  const px = map(x, b.xMin, b.xMax, pad, width - pad);
+  const py = map(y, b.yMin, b.yMax, height - pad, pad);
+  return { x: constrain(px, 0, width), y: constrain(py, 0, height) };
+}
+
+function updatePlayerFromUWB(player, uwbX, uwbY) {
+  ensurePlayerFilters(player);
+  const mapped = mapUWBToScreen(uwbX, uwbY, player.tagId);
+  const ts = millis() * 0.001;
+  player.screenX = player.filters.x.filter(mapped.x, ts);
+  player.screenY = player.filters.y.filter(mapped.y, ts);
+  player.rawX = uwbX;
+  player.rawY = uwbY;
+  player.active = true;
+  player.lastUpdateMs = millis();
+}
+
+function updateDemoMode() {
+  const noData = millis() - game.ws.lastDataMs > CONFIG.DEMO_TIMEOUT_MS;
+  game.demo.enabled = game.demo.forced || !game.ws.connected || noData;
+  if (!game.demo.enabled) return;
+
+  const p1 = game.players.p1;
+  ensurePlayerFilters(p1);
+  const ts = millis() * 0.001;
+  const mx = constrain(mouseX + random(-3, 3), 0, width);
+  const my = constrain(mouseY + random(-3, 3), 0, height);
+  p1.screenX = p1.filters.x.filter(mx, ts);
+  p1.screenY = p1.filters.y.filter(my, ts);
+  p1.active = true;
+  p1.lastUpdateMs = millis();
+}
+
+function pruneStalePlayers() {
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active) continue;
+    if (game.demo.enabled && key === "p1") continue;
+    if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) p.active = false;
+  }
+}
+
+function renderGameToText() {
+  return JSON.stringify({
+    coordinate_system: "origin=(top-left), +x right, +y down, pixels",
+    page: "fruit_ninja",
+    state: game.state,
+    score: floor(game.ninja.score),
+    lives: game.ninja.lives,
+    combo: game.ninja.combo,
+    objects: game.ninja.objects.filter((o) => o.alive).map((o) => ({ type: o.type, x: round(o.x), y: round(o.y), r: round(o.r) })),
+    websocket_connected: game.ws.connected,
+    demo_enabled: game.demo.enabled,
+    players: getActivePlayers().map((p) => ({ label: p.label, x: round(p.screenX), y: round(p.screenY) }))
+  });
+}
+
+function exposeAutomationHooks() {
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms = 16) => new Promise((resolve) => setTimeout(resolve, max(0, ms)));
+}
+
+class LowPassFilter {
+  constructor(alpha, initVal = 0) {
+    this.y = initVal;
+    this.s = initVal;
+    this.initialized = false;
+    this.setAlpha(alpha);
+  }
+  setAlpha(alpha) { this.alpha = alpha; }
+  filter(value) {
+    let result;
+    if (this.initialized) result = this.alpha * value + (1 - this.alpha) * this.s;
+    else { result = value; this.initialized = true; }
+    this.y = value;
+    this.s = result;
+    return result;
+  }
+  hasLastRawValue() { return this.initialized; }
+  lastRawValue() { return this.y; }
+  reset(value = 0) {
+    this.y = value;
+    this.s = value;
+    this.initialized = false;
+  }
+}
+
+class OneEuroFilter {
+  constructor(freq, minCutoff = 1.0, beta = 0.0, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.x = new LowPassFilter(this.alpha(minCutoff));
+    this.dx = new LowPassFilter(this.alpha(dCutoff));
+    this.lastTime = null;
+  }
+  alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+  filter(value, timestamp = null) {
+    if (this.lastTime !== null && timestamp !== null) {
+      const dt = timestamp - this.lastTime;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+    const dValue = this.x.hasLastRawValue() ? (value - this.x.lastRawValue()) * this.freq : 0.0;
+    const edValue = this.dx.filter(dValue);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue);
+    this.x.setAlpha(this.alpha(cutoff));
+    return this.x.filter(value);
+  }
+  reset(value = 0) {
+    this.x.reset(value);
+    this.dx.reset(0);
+    this.lastTime = null;
+  }
+}
+</script>
+</body>
+</html>

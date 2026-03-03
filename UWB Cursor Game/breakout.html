@@ -1,0 +1,1550 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UWB Breakout</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: rgb(10, 10, 15);
+      font-family: "Outfit", sans-serif;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script>
+const CONFIG = {
+  WS_URL: "ws://localhost:8765",
+  UWB_BOUNDS: { xMin: 0, xMax: 4, yMin: 0, yMax: 3 },
+  PLAYER_TAGS: { p1: 1, p2: 2 },
+  CURSOR: {
+    size: 24,
+    trailLength: 12,
+    p1Color: [0, 210, 255],
+    p2Color: [255, 50, 200]
+  },
+  DEMO_TIMEOUT_MS: 3000,
+  WORLD_PADDING: 100,
+  PLAYER_ACTIVE_TIMEOUT_MS: 1200,
+  FILTER: {
+    minCutoff: 1.0,
+    beta: 0.007,
+    dCutoff: 1.0,
+    freq: 20
+  }
+};
+
+const BRICK_ROWS = [
+  { color: [239, 68, 68], points: 60 },
+  { color: [251, 146, 60], points: 50 },
+  { color: [250, 204, 21], points: 40 },
+  { color: [34, 197, 94], points: 30 },
+  { color: [34, 211, 238], points: 20 },
+  { color: [96, 165, 250], points: 10 }
+];
+
+const POWERUP_TYPES = ["multiball", "wide", "laser", "sticky", "extra", "slow"];
+
+const game = {
+  state: "start",
+  players: {
+    p1: createPlayer(CONFIG.PLAYER_TAGS.p1, "P1", CONFIG.CURSOR.p1Color),
+    p2: createPlayer(CONFIG.PLAYER_TAGS.p2, "P2", CONFIG.CURSOR.p2Color)
+  },
+  ws: {
+    socket: null,
+    connected: false,
+    reconnectTimer: null,
+    lastDataMs: 0,
+    packetCount: 0,
+    parseErrors: 0,
+    lastTag: null
+  },
+  demo: {
+    enabled: true,
+    forced: false
+  },
+  ambientParticles: [],
+  effects: {
+    flash: { active: false, startMs: 0, duration: 0, color: [255, 255, 255], alpha: 0 },
+    shake: { active: false, startMs: 0, duration: 0, intensity: 0 },
+    burstParticles: [],
+    floatingScores: [],
+    fragments: []
+  },
+  input: {
+    prevMouseDown: false,
+    backHoverMs: 0,
+    holdStartMs: 0,
+    holdX: 0,
+    holdY: 0,
+    stillStartMs: 0,
+    stillX: 0,
+    stillY: 0
+  },
+  paddle: {
+    x: 0,
+    y: 0,
+    w: 120,
+    h: 14,
+    flashUntil: 0,
+    squash: 0
+  },
+  balls: [],
+  bricks: [],
+  powerups: [],
+  lasers: [],
+  stats: {
+    lives: 3,
+    score: 0,
+    displayedScore: 0,
+    highScore: 0,
+    bricksBroken: 0,
+    levelsCleared: 0,
+    powerupsCaught: 0,
+    combo: 0,
+    bestCombo: 0,
+    lastBrickHitMs: 0
+  },
+  level: {
+    number: 1,
+    cycle: 0,
+    clearUntil: 0
+  },
+  active: {
+    wideUntil: 0,
+    laserUntil: 0,
+    slowUntil: 0,
+    stickyReleases: 0,
+    lastLaserMs: 0
+  },
+  paused: false,
+  navigateTo: ""
+};
+let runtimeQueryString = "";
+const SHARED_CALIBRATION_KEY = "uwb_room_calibration_v1";
+
+function isValidBounds(bounds) {
+  if (!bounds) return false;
+  const xMin = Number(bounds.xMin);
+  const xMax = Number(bounds.xMax);
+  const yMin = Number(bounds.yMin);
+  const yMax = Number(bounds.yMax);
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax) && xMax > xMin && yMax > yMin;
+}
+
+function readSharedCalibrationBounds(tagId = CONFIG.PLAYER_TAGS.p1) {
+  try {
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const byTag = payload && payload.tags ? payload.tags[String(tagId)] : null;
+    if (isValidBounds(byTag)) return byTag;
+    if (isValidBounds(payload && payload.global)) return payload.global;
+  } catch (err) {}
+  return null;
+}
+
+function resolveUwbBoundsForTag(tagId = CONFIG.PLAYER_TAGS.p1) {
+  return readSharedCalibrationBounds(tagId) || CONFIG.UWB_BOUNDS;
+}
+
+function createPlayer(tagId, label, color) {
+  return {
+    tagId,
+    label,
+    color,
+    active: false,
+    screenX: null,
+    screenY: null,
+    rawX: null,
+    rawY: null,
+    lastUpdateMs: 0,
+    trail: [],
+    filters: null
+  };
+}
+
+function ensurePlayerFilters(player) {
+  if (player.filters) return;
+  player.filters = {
+    x: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff),
+    y: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff)
+  };
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  textFont("Outfit");
+  applyURLOverrides();
+  initializeAmbientParticles();
+  connectWebSocket();
+  resetRun(true);
+  exposeAutomationHooks();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  initializeAmbientParticles();
+  positionPaddle();
+}
+
+function resetRun(toStart = false) {
+  game.stats.lives = 3;
+  game.stats.score = 0;
+  game.stats.displayedScore = 0;
+  game.stats.bricksBroken = 0;
+  game.stats.levelsCleared = 0;
+  game.stats.powerupsCaught = 0;
+  game.stats.combo = 0;
+  game.stats.bestCombo = 0;
+  game.stats.lastBrickHitMs = 0;
+  game.level.number = 1;
+  game.level.cycle = 0;
+  game.level.clearUntil = 0;
+  game.powerups = [];
+  game.lasers = [];
+  game.active.wideUntil = 0;
+  game.active.laserUntil = 0;
+  game.active.slowUntil = 0;
+  game.active.stickyReleases = 0;
+  game.active.lastLaserMs = 0;
+  game.paused = false;
+  positionPaddle();
+  generateBricks();
+  spawnBallOnPaddle();
+  game.state = toStart ? "start" : "playing";
+}
+
+function positionPaddle() {
+  game.paddle.y = height - 40;
+  game.paddle.x = width * 0.5;
+}
+
+function spawnBallOnPaddle() {
+  game.balls = [{
+    x: game.paddle.x,
+    y: game.paddle.y - 10,
+    vx: 0,
+    vy: 0,
+    r: 6,
+    onPaddle: true,
+    trail: [],
+    lastBrickColor: [120, 220, 255]
+  }];
+}
+
+function draw() {
+  updateDemoMode();
+  pruneStalePlayers();
+  updatePlayerTrails();
+  updateEffects();
+
+  drawBackground();
+  drawAmbientParticles();
+
+  push();
+  applyScreenShake();
+  drawBrickGlow();
+
+  if (game.state === "start") {
+    drawStartScreen();
+  } else {
+    if (!game.paused && game.state === "playing") {
+      updateBreakoutGameplay();
+    }
+    drawBricks();
+    drawPowerups();
+    drawLasers();
+    drawPaddle();
+    drawBalls();
+
+    if (game.level.clearUntil > millis()) {
+      drawLevelClearOverlay();
+    }
+    if (game.paused) {
+      drawPauseOverlay();
+    }
+    if (game.state === "gameover") {
+      drawGameOverOverlay();
+    }
+  }
+
+  drawFragments();
+  drawBurstParticles();
+  drawFloatingScores();
+  drawCursors();
+  pop();
+
+  drawHUD();
+  drawConnectionIndicator();
+  drawDemoBadge();
+  drawScreenFlash();
+  drawBackButton();
+
+  if (game.navigateTo) {
+    const url = game.navigateTo;
+    game.navigateTo = "";
+    window.location.href = url;
+  }
+
+  game.input.prevMouseDown = mouseIsPressed;
+}
+
+function updateBreakoutGameplay() {
+  updatePaddleFromCursor();
+  updatePauseByStillness();
+  if (game.level.clearUntil > 0) {
+    if (millis() >= game.level.clearUntil) advanceLevel();
+    return;
+  }
+  updatePowerupTimers();
+  updateBalls();
+  updateLasers();
+  updatePowerupDrops();
+}
+
+function updatePaddleFromCursor() {
+  const p = game.players.p1;
+  const target = p.active && p.screenX !== null ? p.screenX : mouseX;
+  const wideOn = millis() < game.active.wideUntil;
+  game.paddle.w = wideOn ? 240 : 120;
+  game.paddle.x = lerp(game.paddle.x, target, isUwbControlActive() ? 0.42 : 0.3);
+  game.paddle.x = constrain(game.paddle.x, game.paddle.w * 0.5 + 8, width - game.paddle.w * 0.5 - 8);
+  game.paddle.squash = lerp(game.paddle.squash, 0, 0.2);
+}
+
+function updatePauseByStillness() {
+  const p = game.players.p1;
+  const pt = p.active && p.screenX !== null ? { x: p.screenX, y: p.screenY } : { x: mouseX, y: mouseY };
+
+  if (game.input.stillStartMs === 0) {
+    game.input.stillStartMs = millis();
+    game.input.stillX = pt.x;
+    game.input.stillY = pt.y;
+    return;
+  }
+
+  const moveThreshold = isUwbControlActive() ? 12 : 8;
+  const pauseDelayMs = isUwbControlActive() ? 3800 : 3000;
+  if (dist(pt.x, pt.y, game.input.stillX, game.input.stillY) > moveThreshold) {
+    game.input.stillStartMs = millis();
+    game.input.stillX = pt.x;
+    game.input.stillY = pt.y;
+    if (game.paused) game.paused = false;
+  } else if (!game.paused && millis() - game.input.stillStartMs > pauseDelayMs && game.state === "playing") {
+    game.paused = true;
+  }
+}
+
+function updatePowerupTimers() {
+  const now = millis();
+  if (game.active.laserUntil > now && now - game.active.lastLaserMs > 400) {
+    fireLasers();
+    game.active.lastLaserMs = now;
+  }
+}
+
+function launchBall(ball = game.balls[0]) {
+  if (!ball || !ball.onPaddle) return;
+  const angle = radians(random(70, 110));
+  const speed = baseBallSpeed();
+  ball.vx = cos(angle) * speed;
+  ball.vy = -abs(sin(angle) * speed);
+  ball.onPaddle = false;
+}
+
+function baseBallSpeed() {
+  const base = min(8, 4.8 + (game.level.number - 1) * 0.28);
+  return isUwbControlActive() ? base * 0.88 : base;
+}
+
+function updateBalls() {
+  if (game.state !== "playing") return;
+
+  const now = millis();
+  for (let i = game.balls.length - 1; i >= 0; i--) {
+    const b = game.balls[i];
+
+    if (b.onPaddle) {
+      b.x = game.paddle.x;
+      b.y = game.paddle.y - game.paddle.h * 0.5 - b.r - 2;
+      updateBallTrail(b);
+      continue;
+    }
+
+    b.x += b.vx;
+    b.y += b.vy;
+
+    if (b.x - b.r < 0) {
+      b.x = b.r;
+      b.vx *= -1;
+      resetComboOnWall();
+    }
+    if (b.x + b.r > width) {
+      b.x = width - b.r;
+      b.vx *= -1;
+      resetComboOnWall();
+    }
+    if (b.y - b.r < 0) {
+      b.y = b.r;
+      b.vy *= -1;
+      resetComboOnWall();
+    }
+
+    if (ballHitsPaddle(b)) {
+      const rel = (b.x - game.paddle.x) / max(1, game.paddle.w * 0.5);
+      const maxAngle = 4;
+      b.vx = rel * maxAngle;
+      b.vy = -abs(baseBallSpeed() - abs(b.vx));
+      game.paddle.flashUntil = now + 100;
+      game.paddle.squash = 1;
+      emitParticles(b.x, game.paddle.y - 2, [180, 245, 255], 6, 2.5);
+      resetComboOnWall();
+
+      if (game.active.stickyReleases > 0) {
+        b.onPaddle = true;
+      }
+    }
+
+    if (collideBallWithBricks(b)) {
+      const spd = sqrt(b.vx * b.vx + b.vy * b.vy);
+      const inc = 0.008;
+      const speedCap = isUwbControlActive() ? 6.8 : 8;
+      const target = min(speedCap, spd + inc);
+      if (spd > 0) {
+        b.vx = (b.vx / spd) * target;
+        b.vy = (b.vy / spd) * target;
+      }
+    }
+
+    if (millis() < game.active.slowUntil) {
+      const spd = sqrt(b.vx * b.vx + b.vy * b.vy);
+      const cap = max(3.6, baseBallSpeed() * 0.84);
+      if (spd > cap) {
+        b.vx = (b.vx / spd) * cap;
+        b.vy = (b.vy / spd) * cap;
+      }
+    }
+
+    if (b.y - b.r > height + 20) {
+      game.balls.splice(i, 1);
+      continue;
+    }
+
+    updateBallTrail(b);
+  }
+
+  if (game.balls.length === 0 && game.level.clearUntil === 0) {
+    game.stats.lives--;
+    triggerShake(8, 240);
+    triggerFlash([239, 68, 68], 220, 120);
+    if (game.stats.lives <= 0) {
+      game.state = "gameover";
+      game.stats.highScore = max(game.stats.highScore, floor(game.stats.score));
+    } else {
+      spawnBallOnPaddle();
+    }
+  }
+
+  if (allBricksCleared() && game.level.clearUntil === 0) {
+    game.level.clearUntil = millis() + 1500;
+    game.stats.levelsCleared++;
+    triggerFlash([132, 255, 170], 220, 100);
+  }
+}
+
+function updateBallTrail(ball) {
+  ball.trail.unshift({ x: ball.x, y: ball.y });
+  if (ball.trail.length > 8) ball.trail.length = 8;
+}
+
+function ballHitsPaddle(ball) {
+  const pad = isUwbControlActive() ? 10 : 0;
+  const px = game.paddle.x - game.paddle.w * 0.5;
+  const py = game.paddle.y - game.paddle.h * 0.5;
+  const hit = ball.x >= px - ball.r - pad && ball.x <= px + game.paddle.w + ball.r + pad &&
+    ball.y + ball.r >= py - pad && ball.y - ball.r <= py + game.paddle.h + pad && ball.vy > 0;
+  if (hit) ball.y = py - ball.r;
+  return hit;
+}
+
+function collideBallWithBricks(ball) {
+  for (const brick of game.bricks) {
+    if (!brick.alive) continue;
+    const left = brick.x;
+    const right = brick.x + brick.w;
+    const top = brick.y;
+    const bottom = brick.y + brick.h;
+    if (ball.x + ball.r < left || ball.x - ball.r > right || ball.y + ball.r < top || ball.y - ball.r > bottom) continue;
+
+    const overlapL = abs((ball.x + ball.r) - left);
+    const overlapR = abs(right - (ball.x - ball.r));
+    const overlapT = abs((ball.y + ball.r) - top);
+    const overlapB = abs(bottom - (ball.y - ball.r));
+    const minOverlap = min(overlapL, overlapR, overlapT, overlapB);
+
+    if (minOverlap === overlapL || minOverlap === overlapR) ball.vx *= -1;
+    else ball.vy *= -1;
+
+    brick.hits++;
+    if (brick.hits >= brick.maxHits) {
+      brick.alive = false;
+      game.stats.bricksBroken++;
+      game.stats.score += brick.points;
+      ball.lastBrickColor = brick.color;
+      emitBrickFragments(brick);
+      emitParticles(brick.x + brick.w * 0.5, brick.y + brick.h * 0.5, brick.color, 8, 3.2);
+      addFloatingText(brick.x + brick.w * 0.5, brick.y + brick.h * 0.5, `+${brick.points}`, [255, 245, 200]);
+      triggerShake(1, 50);
+
+      if (random() < 0.15) {
+        spawnPowerupDrop(brick.x + brick.w * 0.5, brick.y + brick.h * 0.5);
+      }
+
+      const now = millis();
+      if (now - game.stats.lastBrickHitMs <= 1000) {
+        game.stats.combo++;
+      } else {
+        game.stats.combo = 1;
+      }
+      game.stats.lastBrickHitMs = now;
+      game.stats.bestCombo = max(game.stats.bestCombo, game.stats.combo);
+      if (game.stats.combo >= 3) {
+        const bonus = 10 * game.stats.combo;
+        game.stats.score += bonus;
+        addFloatingText(brick.x + brick.w * 0.5, brick.y - 12, `x${game.stats.combo}`, [255, 210, 120]);
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function resetComboOnWall() {
+  game.stats.combo = 0;
+}
+
+function allBricksCleared() {
+  return game.bricks.every((b) => !b.alive);
+}
+
+function advanceLevel() {
+  game.level.clearUntil = 0;
+  game.level.number++;
+  game.powerups = [];
+  game.lasers = [];
+  game.active.wideUntil = 0;
+  game.active.laserUntil = 0;
+  game.active.slowUntil = 0;
+  game.active.stickyReleases = 0;
+  generateBricks();
+  spawnBallOnPaddle();
+}
+
+function generateBricks() {
+  game.bricks = [];
+  const cols = 10;
+  const rows = 6;
+  const gap = 4;
+  const bw = min(60, (width - 120 - gap * (cols - 1)) / cols);
+  const bh = 20;
+  const totalW = cols * bw + (cols - 1) * gap;
+  const startX = width * 0.5 - totalW * 0.5;
+  const startY = 60;
+
+  const cycle = floor((game.level.number - 1) / 5);
+  const pattern = (game.level.number - 1) % 5;
+  const hardChance = cycle > 0 ? constrain(0.1 + cycle * 0.05, 0.1, 0.25) : 0;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!layoutAllows(pattern, r, c, rows, cols)) continue;
+      const rowDef = BRICK_ROWS[r];
+      const hard = random() < hardChance;
+      game.bricks.push({
+        x: startX + c * (bw + gap),
+        y: startY + r * (bh + gap),
+        w: bw,
+        h: bh,
+        row: r,
+        color: rowDef.color,
+        points: rowDef.points,
+        alive: true,
+        hits: 0,
+        maxHits: hard ? 2 : 1,
+        hard
+      });
+    }
+  }
+}
+
+function layoutAllows(pattern, r, c, rows, cols) {
+  if (pattern === 0) return true;
+  if (pattern === 1) return (r + c) % 2 === 0;
+  if (pattern === 2) {
+    const cx = (cols - 1) * 0.5;
+    const cy = (rows - 1) * 0.5;
+    const d = abs(c - cx) + abs(r - cy);
+    return d <= 3.5;
+  }
+  if (pattern === 3) return (r === 0 || r === rows - 1 || c === 0 || c === cols - 1);
+  return r % 2 === 0;
+}
+
+function spawnPowerupDrop(x, y) {
+  game.powerups.push({
+    x,
+    y,
+    vy: 2,
+    rot: random(TWO_PI),
+    type: random(POWERUP_TYPES)
+  });
+}
+
+function updatePowerupDrops() {
+  for (let i = game.powerups.length - 1; i >= 0; i--) {
+    const p = game.powerups[i];
+    p.y += p.vy;
+    p.rot += 0.03;
+
+    if (powerupCaught(p)) {
+      applyPowerup(p.type);
+      game.stats.powerupsCaught++;
+      emitParticles(p.x, p.y, powerColor(p.type), 14, 4.3);
+      game.powerups.splice(i, 1);
+      continue;
+    }
+
+    if (p.y > height + 20) {
+      game.powerups.splice(i, 1);
+    }
+  }
+}
+
+function powerupCaught(p) {
+  const pad = isUwbControlActive() ? 12 : 0;
+  const px = game.paddle.x - game.paddle.w * 0.5;
+  const py = game.paddle.y - game.paddle.h * 0.5;
+  return p.x >= px - pad && p.x <= px + game.paddle.w + pad && p.y >= py - 10 - pad && p.y <= py + game.paddle.h + 6 + pad;
+}
+
+function applyPowerup(type) {
+  const now = millis();
+  if (type === "multiball") {
+    if (game.balls.length > 0) {
+      const b = game.balls[0];
+      const spd = sqrt(b.vx * b.vx + b.vy * b.vy) || baseBallSpeed();
+      for (const angle of [-30, 30]) {
+        const a = atan2(b.vy, b.vx) + radians(angle);
+        game.balls.push({
+          x: b.x,
+          y: b.y,
+          vx: cos(a) * spd,
+          vy: sin(a) * spd,
+          r: 6,
+          onPaddle: false,
+          trail: [],
+          lastBrickColor: [...b.lastBrickColor]
+        });
+      }
+    }
+  } else if (type === "wide") {
+    game.active.wideUntil = now + 10000;
+  } else if (type === "laser") {
+    game.active.laserUntil = now + 8000;
+    fireLasers();
+    game.active.lastLaserMs = now;
+  } else if (type === "sticky") {
+    game.active.stickyReleases = 3;
+  } else if (type === "extra") {
+    game.stats.lives = min(5, game.stats.lives + 1);
+  } else if (type === "slow") {
+    game.active.slowUntil = now + 10000;
+    for (const b of game.balls) {
+      b.vx *= 0.8;
+      b.vy *= 0.8;
+    }
+  }
+}
+
+function fireLasers() {
+  if (game.state !== "playing") return;
+  if (millis() > game.active.laserUntil) return;
+  game.lasers.push({ x: game.paddle.x - game.paddle.w * 0.35, y: game.paddle.y - 10, vy: -8 });
+  game.lasers.push({ x: game.paddle.x + game.paddle.w * 0.35, y: game.paddle.y - 10, vy: -8 });
+}
+
+function updateLasers() {
+  for (let i = game.lasers.length - 1; i >= 0; i--) {
+    const l = game.lasers[i];
+    l.y += l.vy;
+
+    let hit = false;
+    for (const brick of game.bricks) {
+      if (!brick.alive) continue;
+      if (l.x >= brick.x && l.x <= brick.x + brick.w && l.y >= brick.y && l.y <= brick.y + brick.h) {
+        brick.hits++;
+        if (brick.hits >= brick.maxHits) {
+          brick.alive = false;
+          game.stats.bricksBroken++;
+          game.stats.score += brick.points;
+          emitBrickFragments(brick);
+        }
+        hit = true;
+        break;
+      }
+    }
+
+    if (hit || l.y < -20) game.lasers.splice(i, 1);
+  }
+}
+
+function emitBrickFragments(brick) {
+  for (let i = 0; i < 6; i++) {
+    game.effects.fragments.push({
+      x: brick.x + brick.w * 0.5,
+      y: brick.y + brick.h * 0.5,
+      vx: random(-2.4, 2.4),
+      vy: random(-2.8, 1.6),
+      w: random(4, 10),
+      h: random(3, 8),
+      rot: random(TWO_PI),
+      vr: random(-0.08, 0.08),
+      alpha: 255,
+      color: [...brick.color]
+    });
+  }
+}
+
+function drawFragments() {
+  for (let i = game.effects.fragments.length - 1; i >= 0; i--) {
+    const f = game.effects.fragments[i];
+    f.x += f.vx;
+    f.y += f.vy;
+    f.vy += 0.08;
+    f.alpha -= 8;
+    f.rot += f.vr;
+    if (f.alpha <= 0) {
+      game.effects.fragments.splice(i, 1);
+      continue;
+    }
+    push();
+    translate(f.x, f.y);
+    rotate(f.rot);
+    noStroke();
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    rect(-f.w * 0.5, -f.h * 0.5, f.w, f.h, 2);
+    pop();
+  }
+}
+
+function drawStartScreen() {
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(min(82, width * 0.1));
+  fill(255, 238);
+  text("BREAKOUT", width * 0.5, height * 0.24);
+
+  textStyle(500);
+  textSize(22);
+  fill(220, 232, 255, 190);
+  text("Move to control paddle. Break all bricks.", width * 0.5, height * 0.37);
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 110, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(28);
+  text("Press SPACE to launch", width * 0.5, height * 0.48);
+
+  drawPaddlePreview();
+}
+
+function drawPaddlePreview() {
+  const x = width * 0.5;
+  const y = height * 0.65;
+  noStroke();
+  fill(0, 210, 255, 225);
+  rect(x - 60, y - 7, 120, 14, 8);
+  fill(255, 220);
+  rect(x - 50, y - 6, 100, 3, 4);
+
+  const bx = x + sin(millis() * 0.004) * 130;
+  const by = y - 100 + cos(millis() * 0.006) * 20;
+  noStroke();
+  fill(255, 235, 170, 220);
+  circle(bx, by, 12);
+}
+
+function drawLevelClearOverlay() {
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(58);
+  fill(132, 255, 170, 235);
+  text("LEVEL CLEAR!", width * 0.5, height * 0.5);
+}
+
+function drawPauseOverlay() {
+  noStroke();
+  fill(8, 10, 14, 160);
+  rect(0, 0, width, height);
+  fill(255, 235);
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(54);
+  text("PAUSED", width * 0.5, height * 0.5);
+}
+
+function drawGameOverOverlay() {
+  noStroke();
+  fill(8, 10, 15, 180);
+  rect(0, 0, width, height);
+
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(72);
+  fill(255, 235);
+  text("GAME OVER", width * 0.5, height * 0.36);
+
+  textStyle(700);
+  textSize(30);
+  fill(255, 220, 120, 220);
+  text(`Score ${floor(game.stats.score)}`, width * 0.5, height * 0.46);
+
+  textStyle(500);
+  textSize(18);
+  fill(220, 230, 255, 185);
+  text(`Bricks ${game.stats.bricksBroken}   Levels ${game.stats.levelsCleared}   Powerups ${game.stats.powerupsCaught}`,
+    width * 0.5, height * 0.53);
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 110, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(25);
+  text("Press SPACE to retry", width * 0.5, height * 0.61);
+}
+
+function drawBrickGlow() {
+  const aliveCount = game.bricks.filter((b) => b.alive).length;
+  const maxBricks = max(1, game.bricks.length);
+  const alpha = map(aliveCount, 0, maxBricks, 0, 60);
+  noStroke();
+  fill(120, 190, 255, alpha);
+  rect(0, 0, width, 220);
+}
+
+function drawBricks() {
+  for (const b of game.bricks) {
+    if (!b.alive) continue;
+    noStroke();
+    fill(b.color[0], b.color[1], b.color[2], 18);
+    rect(b.x - 2, b.y - 2, b.w + 4, b.h + 4, 4);
+
+    fill(b.color[0], b.color[1], b.color[2], 220);
+    rect(b.x, b.y, b.w, b.h, 4);
+
+    fill(255, 90);
+    rect(b.x + 2, b.y + 2, b.w - 4, 3, 2);
+    fill(0, 0, 0, 40);
+    rect(b.x + 2, b.y + b.h - 5, b.w - 4, 3, 2);
+
+    if (b.maxHits === 2 && b.hits === 1) {
+      stroke(255, 210);
+      strokeWeight(1.6);
+      line(b.x + 8, b.y + 4, b.x + b.w - 8, b.y + b.h - 4);
+      line(b.x + b.w - 12, b.y + 5, b.x + 10, b.y + b.h - 6);
+    }
+  }
+}
+
+function drawPowerups() {
+  for (const p of game.powerups) {
+    const col = powerColor(p.type);
+    push();
+    translate(p.x, p.y);
+    rotate(p.rot);
+    noStroke();
+    fill(col[0], col[1], col[2], 225);
+    rectMode(CENTER);
+    rect(0, 0, 30, 18, 9);
+    fill(255, 235);
+    textAlign(CENTER, CENTER);
+    textStyle(900);
+    textSize(9);
+    text(powerSymbol(p.type), 0, 1);
+    rectMode(CORNER);
+    pop();
+  }
+}
+
+function drawLasers() {
+  stroke(255, 100, 100, 240);
+  strokeWeight(3);
+  for (const l of game.lasers) {
+    line(l.x, l.y, l.x, l.y - 14);
+  }
+}
+
+function drawPaddle() {
+  const p = game.paddle;
+  const s = p.squash;
+  const h = lerp(p.h, p.h * 0.72, s);
+  const y = p.y + s * 2;
+
+  noStroke();
+  fill(0, 210, 255, 220);
+  rect(p.x - p.w * 0.5, y - h * 0.5, p.w, h, 999);
+
+  fill(255, 220);
+  rect(p.x - p.w * 0.44, y - h * 0.5 + 1, p.w * 0.88, 3, 3);
+
+  if (millis() < p.flashUntil) {
+    fill(255, 255, 255, 120);
+    rect(p.x - p.w * 0.5, y - h * 0.5, p.w, h, 999);
+  }
+
+  if (millis() < game.active.laserUntil) {
+    fill(255, 90, 90, 220);
+    rect(p.x - p.w * 0.5 - 4, y - h * 0.5 - 6, 6, 8, 2);
+    rect(p.x + p.w * 0.5 - 2, y - h * 0.5 - 6, 6, 8, 2);
+  }
+}
+
+function drawBalls() {
+  for (const b of game.balls) {
+    for (let i = b.trail.length - 1; i >= 0; i--) {
+      const t = b.trail[i];
+      const n = i / max(1, b.trail.length - 1);
+      noStroke();
+      fill(b.lastBrickColor[0], b.lastBrickColor[1], b.lastBrickColor[2], lerp(0, 180, 1 - n));
+      circle(t.x, t.y, lerp(2, 8, 1 - n));
+    }
+
+    noStroke();
+    fill(255, 230, 170, 235);
+    circle(b.x, b.y, b.r * 2);
+  }
+}
+
+function drawHUD() {
+  if (game.state === "start") return;
+
+  game.stats.displayedScore = lerp(game.stats.displayedScore, game.stats.score, 0.14);
+
+  textAlign(CENTER, TOP);
+  textStyle(900);
+  textSize(34);
+  fill(245, 250, 255, 235);
+  text(floor(game.stats.displayedScore), width * 0.5, 14);
+
+  textAlign(LEFT, TOP);
+  textStyle(700);
+  textSize(16);
+  fill(255, 220, 130, 220);
+  text(`LEVEL ${game.level.number}`, 14, 44);
+
+  textAlign(RIGHT, TOP);
+  textStyle(700);
+  textSize(14);
+  fill(220, 235, 255, 200);
+  text(`BEST ${floor(game.stats.highScore)}`, width - 14, 16);
+
+  drawLivesDots(width - 90, 42);
+  drawActivePowerupHUD();
+
+  if (game.balls.length > 1) {
+    textAlign(CENTER, TOP);
+    textStyle(800);
+    textSize(16);
+    fill(255, 210, 120, 220);
+    text(`x${game.balls.length} BALLS`, width * 0.5, 54);
+  }
+}
+
+function drawLivesDots(x, y) {
+  for (let i = 0; i < 5; i++) {
+    const alive = i < game.stats.lives;
+    noStroke();
+    fill(alive ? 132 : 70, alive ? 255 : 70, alive ? 170 : 85, alive ? 230 : 120);
+    circle(x + i * 14, y, 9);
+  }
+}
+
+function drawActivePowerupHUD() {
+  const now = millis();
+  const rows = [];
+  if (now < game.active.wideUntil) rows.push({ label: "WIDE", left: game.active.wideUntil - now, total: 10000, color: powerColor("wide") });
+  if (now < game.active.laserUntil) rows.push({ label: "LASER", left: game.active.laserUntil - now, total: 8000, color: powerColor("laser") });
+  if (now < game.active.slowUntil) rows.push({ label: "SLOW", left: game.active.slowUntil - now, total: 10000, color: powerColor("slow") });
+  if (game.active.stickyReleases > 0) rows.push({ label: `STICKY x${game.active.stickyReleases}`, left: game.active.stickyReleases, total: 3, color: powerColor("sticky") });
+
+  let y = height - 86;
+  for (const r of rows) {
+    noStroke();
+    fill(14, 18, 30, 170);
+    rect(14, y, 170, 16, 6);
+    const pct = constrain(r.left / r.total, 0, 1);
+    fill(r.color[0], r.color[1], r.color[2], 210);
+    rect(14, y, 170 * pct, 16, 6);
+    fill(255, 235);
+    textAlign(LEFT, CENTER);
+    textSize(11);
+    textStyle(700);
+    text(r.label, 20, y + 8);
+    y += 22;
+  }
+}
+
+function powerColor(type) {
+  if (type === "multiball") return [100, 180, 255];
+  if (type === "wide") return [120, 255, 150];
+  if (type === "laser") return [255, 110, 110];
+  if (type === "sticky") return [255, 225, 110];
+  if (type === "extra") return [255, 125, 200];
+  return [100, 235, 255];
+}
+
+function powerSymbol(type) {
+  if (type === "multiball") return "3";
+  if (type === "wide") return "W";
+  if (type === "laser") return "L";
+  if (type === "sticky") return "S";
+  if (type === "extra") return "+1";
+  return "↓";
+}
+
+function drawBackButton() {
+  const rectObj = { x: 10, y: 8, w: 88, h: 24 };
+  const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+  const pHover = getActivePlayers().some((p) => cursorOverlapsRect(p, rectObj));
+  const hover = mouseHover || pHover;
+
+  if (hover) {
+    if (game.input.backHoverMs === 0) game.input.backHoverMs = millis();
+    if ((mouseIsPressed && !game.input.prevMouseDown) || millis() - game.input.backHoverMs > 1000) {
+      game.navigateTo = withRuntimeQuery("game_menu.html");
+    }
+  } else {
+    game.input.backHoverMs = 0;
+  }
+
+  noStroke();
+  fill(10, 10, 15, 150);
+  rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 6);
+  fill(255, hover ? 255 : 130);
+  textAlign(LEFT, CENTER);
+  textStyle(600);
+  textSize(14);
+  text("← MENU", rectObj.x + 10, rectObj.y + 12);
+  if (hover) {
+    stroke(255, 220);
+    line(rectObj.x + 10, rectObj.y + 18, rectObj.x + 62, rectObj.y + 18);
+  }
+}
+
+function pointInRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function cursorOverlapsRect(player, rectObj) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  const nx = constrain(player.screenX, rectObj.x, rectObj.x + rectObj.w);
+  const ny = constrain(player.screenY, rectObj.y, rectObj.y + rectObj.h);
+  return dist(player.screenX, player.screenY, nx, ny) <= CONFIG.CURSOR.size * 0.5;
+}
+
+function keyPressed() {
+  if (key === "d" || key === "D") game.demo.forced = !game.demo.forced;
+  if (key === "Escape") game.navigateTo = withRuntimeQuery("game_menu.html");
+
+  if (key === "p" || key === "P") {
+    if (game.state === "playing") game.paused = !game.paused;
+  }
+
+  if (key === " " || keyCode === 32) {
+    if (game.state === "start") {
+      game.state = "playing";
+      return;
+    }
+    if (game.state === "gameover") {
+      resetRun(false);
+      return;
+    }
+
+    if (game.state === "playing") {
+      if (millis() < game.active.laserUntil) {
+        fireLasers();
+      }
+      for (const b of game.balls) {
+        if (b.onPaddle) {
+          if (game.active.stickyReleases > 0) game.active.stickyReleases--;
+          launchBall(b);
+        }
+      }
+    }
+  }
+}
+
+function mousePressed() {
+  if (game.state === "start") {
+    game.state = "playing";
+    return;
+  }
+  if (game.state === "playing") {
+    for (const b of game.balls) {
+      if (b.onPaddle) {
+        if (game.active.stickyReleases > 0) game.active.stickyReleases--;
+        launchBall(b);
+      }
+    }
+  }
+}
+
+function drawBackground() {
+  background(8, 10, 16);
+  const g = 46;
+  for (let x = 0; x < width; x += g) {
+    for (let y = 0; y < height; y += g) {
+      const d = game.balls.length ? dist(x, y, game.balls[0].x, game.balls[0].y) : 999;
+      const a = map(d, 0, 500, 32, 4);
+      noStroke();
+      fill(110, 150, 220, a);
+      rect(x, y, 1, 1);
+    }
+  }
+}
+
+function initializeAmbientParticles() {
+  game.ambientParticles = [];
+  for (let i = 0; i < 50; i++) game.ambientParticles.push(makeAmbientParticle(true));
+}
+
+function makeAmbientParticle(randomY = false) {
+  return {
+    x: random(width),
+    y: randomY ? random(height) : height + random(10, 160),
+    vx: random(-0.2, 0.2),
+    vy: random(-0.6, -0.1),
+    size: random(1, 3),
+    alpha: random(15, 50)
+  };
+}
+
+function drawAmbientParticles() {
+  noStroke();
+  for (const p of game.ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.y < -8) Object.assign(p, makeAmbientParticle(false));
+    if (p.x < -8) p.x = width + 8;
+    if (p.x > width + 8) p.x = -8;
+    fill(255, p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function updatePlayerTrails() {
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    p.trail.unshift({ x: p.screenX, y: p.screenY });
+    if (p.trail.length > CONFIG.CURSOR.trailLength) p.trail.length = CONFIG.CURSOR.trailLength;
+  }
+}
+
+function drawCursors() {
+  for (const p of [game.players.p1, game.players.p2]) {
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    drawCursorTrail(p);
+    drawCursorGlow(p);
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], 220);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size);
+    fill(255, 180);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size * 0.35);
+  }
+}
+
+function drawCursorTrail(player) {
+  const tlen = player.trail.length;
+  for (let i = tlen - 1; i >= 0; i--) {
+    const pt = player.trail[i];
+    const n = i / max(1, tlen - 1);
+    const size = lerp(4, CONFIG.CURSOR.size, 1 - n);
+    const alpha = lerp(0, 180, 1 - n) * 0.35;
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(pt.x, pt.y, size);
+  }
+}
+
+function drawCursorGlow(player) {
+  const layers = 12;
+  const maxR = CONFIG.CURSOR.size * 2.5;
+  for (let i = layers; i >= 1; i--) {
+    const r = map(i, 1, layers, CONFIG.CURSOR.size * 0.5, maxR);
+    const alpha = map(i, 1, layers, 30, 0);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(player.screenX, player.screenY, r);
+  }
+}
+
+function getActivePlayers() {
+  const out = [];
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (p.active && p.screenX !== null && p.screenY !== null) out.push(p);
+  }
+  return out;
+}
+
+function triggerShake(intensity, duration) {
+  game.effects.shake.active = true;
+  game.effects.shake.intensity = intensity;
+  game.effects.shake.duration = duration;
+  game.effects.shake.startMs = millis();
+}
+
+function applyScreenShake() {
+  const s = game.effects.shake;
+  if (!s.active) return;
+  const elapsed = millis() - s.startMs;
+  if (elapsed >= s.duration) {
+    s.active = false;
+    return;
+  }
+  const decay = 1 - elapsed / s.duration;
+  translate(random(-1, 1) * s.intensity * decay, random(-1, 1) * s.intensity * decay);
+}
+
+function triggerFlash(color, duration, alpha = 120) {
+  game.effects.flash.active = true;
+  game.effects.flash.color = [...color];
+  game.effects.flash.duration = duration;
+  game.effects.flash.startMs = millis();
+  game.effects.flash.alpha = alpha;
+}
+
+function drawScreenFlash() {
+  const f = game.effects.flash;
+  if (!f.active) return;
+  const elapsed = millis() - f.startMs;
+  if (elapsed >= f.duration) {
+    f.active = false;
+    return;
+  }
+  const a = map(elapsed, 0, f.duration, f.alpha, 0);
+  noStroke();
+  fill(f.color[0], f.color[1], f.color[2], a);
+  rect(0, 0, width, height);
+}
+
+function emitParticles(x, y, color, count = 12, maxSpeed = 5) {
+  for (let i = 0; i < count; i++) {
+    const ang = random(TWO_PI);
+    const spd = random(0.6, maxSpeed);
+    game.effects.burstParticles.push({
+      x,
+      y,
+      vx: cos(ang) * spd,
+      vy: sin(ang) * spd,
+      size: random(3, 8),
+      alpha: 255,
+      decay: random(4, 8),
+      color: [...color]
+    });
+  }
+}
+
+function drawBurstParticles() {
+  for (let i = game.effects.burstParticles.length - 1; i >= 0; i--) {
+    const p = game.effects.burstParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.99;
+    p.vy += 0.06;
+    p.alpha -= p.decay;
+    p.size *= 0.986;
+    if (p.alpha <= 0 || p.size <= 0.7) {
+      game.effects.burstParticles.splice(i, 1);
+      continue;
+    }
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function addFloatingText(x, y, txt, color = [255, 255, 255]) {
+  game.effects.floatingScores.push({
+    x,
+    y,
+    vy: -1.7,
+    alpha: 255,
+    life: 50,
+    maxLife: 50,
+    text: txt,
+    color
+  });
+}
+
+function drawFloatingScores() {
+  for (let i = game.effects.floatingScores.length - 1; i >= 0; i--) {
+    const f = game.effects.floatingScores[i];
+    f.y += f.vy;
+    f.vy *= 0.94;
+    f.life -= 1;
+    f.alpha = map(f.life, 0, f.maxLife, 0, 255);
+    if (f.life <= 0) {
+      game.effects.floatingScores.splice(i, 1);
+      continue;
+    }
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(24);
+    text(f.text, f.x, f.y);
+  }
+}
+
+function updateEffects() {}
+
+function drawConnectionIndicator() {
+  noStroke();
+  fill(game.ws.connected ? color(34, 197, 94, 240) : color(239, 68, 68, 240));
+  circle(16, 16, 8);
+}
+
+function drawDemoBadge() {
+  if (!game.demo.enabled) return;
+  const w = 62;
+  const h = 24;
+  noStroke();
+  fill(245, 158, 11, 220);
+  rect(width - w - 12, 12, w, h, 6);
+  fill(20, 14, 8, 240);
+  textAlign(CENTER, CENTER);
+  textStyle(800);
+  textSize(12);
+  text("DEMO", width - w * 0.5 - 12, 24);
+}
+
+function withRuntimeQuery(path) {
+  return runtimeQueryString ? `${path}${runtimeQueryString}` : path;
+}
+
+function applyURLOverrides() {
+  const params = new URLSearchParams(window.location.search);
+  runtimeQueryString = window.location.search || "";
+
+  const wsParam = params.get("ws");
+  if (wsParam) CONFIG.WS_URL = wsParam;
+
+  const tag1 = Number(params.get("tag1"));
+  if (Number.isFinite(tag1)) {
+    CONFIG.PLAYER_TAGS.p1 = tag1;
+    game.players.p1.tagId = tag1;
+  }
+  const tag2 = Number(params.get("tag2"));
+  if (Number.isFinite(tag2)) {
+    CONFIG.PLAYER_TAGS.p2 = tag2;
+    game.players.p2.tagId = tag2;
+  }
+}
+
+function connectWebSocket() {
+  if (game.ws.socket) {
+    try { game.ws.socket.close(); } catch (_) {}
+  }
+  const ws = new WebSocket(CONFIG.WS_URL);
+  game.ws.socket = ws;
+  ws.onopen = () => { game.ws.connected = true; };
+  ws.onmessage = (evt) => {
+    game.ws.packetCount++;
+    let payload;
+    try {
+      payload = JSON.parse(evt.data);
+    } catch (_) {
+      game.ws.parseErrors++;
+      return;
+    }
+    ingestTagPayload(payload);
+  };
+  ws.onerror = () => { game.ws.connected = false; };
+  ws.onclose = () => {
+    game.ws.connected = false;
+    if (game.ws.reconnectTimer) clearTimeout(game.ws.reconnectTimer);
+    game.ws.reconnectTimer = setTimeout(connectWebSocket, 1000);
+  };
+}
+
+function ingestTagPayload(payload) {
+  const tags = normalizeTags(payload);
+  if (!tags.length) return;
+
+  game.ws.lastDataMs = millis();
+  for (const t of tags) {
+    const tid = Number(t.id ?? t.tagId ?? t.tag_id);
+    const tx = Number(t.x ?? t.posX ?? t.pos_x);
+    const ty = Number(t.y ?? t.posY ?? t.pos_y);
+    if (!Number.isFinite(tid) || !Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+    game.ws.lastTag = { id: tid, x: tx, y: ty, ms: millis() };
+    if (tid === game.players.p1.tagId) updatePlayerFromUWB(game.players.p1, tx, ty);
+    else if (tid === game.players.p2.tagId) updatePlayerFromUWB(game.players.p2, tx, ty);
+  }
+}
+
+function normalizeTags(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.tags)) return payload.tags;
+  if (payload && payload.tag) return [payload.tag];
+  if (payload && (payload.id !== undefined || payload.tagId !== undefined || payload.tag_id !== undefined)) return [payload];
+  return [];
+}
+
+function mapUWBToScreen(x, y, tagId = CONFIG.PLAYER_TAGS.p1) {
+  const shared = readSharedCalibrationBounds(tagId);
+  const b = shared || CONFIG.UWB_BOUNDS;
+  const pad = shared ? 0 : CONFIG.WORLD_PADDING;
+  const px = map(x, b.xMin, b.xMax, pad, width - pad);
+  const py = map(y, b.yMin, b.yMax, height - pad, pad);
+  return { x: constrain(px, 0, width), y: constrain(py, 0, height) };
+}
+
+function updatePlayerFromUWB(player, uwbX, uwbY) {
+  ensurePlayerFilters(player);
+  const mapped = mapUWBToScreen(uwbX, uwbY, player.tagId);
+  const ts = millis() * 0.001;
+  player.screenX = player.filters.x.filter(mapped.x, ts);
+  player.screenY = player.filters.y.filter(mapped.y, ts);
+  player.rawX = uwbX;
+  player.rawY = uwbY;
+  player.active = true;
+  player.lastUpdateMs = millis();
+}
+
+function updateDemoMode() {
+  const noData = millis() - game.ws.lastDataMs > CONFIG.DEMO_TIMEOUT_MS;
+  game.demo.enabled = game.demo.forced || !game.ws.connected || noData;
+  if (!game.demo.enabled) return;
+
+  const p1 = game.players.p1;
+  ensurePlayerFilters(p1);
+  const ts = millis() * 0.001;
+  const mx = constrain(mouseX + random(-3, 3), 0, width);
+  const my = constrain(mouseY + random(-3, 3), 0, height);
+  p1.screenX = p1.filters.x.filter(mx, ts);
+  p1.screenY = p1.filters.y.filter(my, ts);
+  p1.active = true;
+  p1.lastUpdateMs = millis();
+}
+
+function isUwbControlActive() {
+  const p = game.players.p1;
+  return !game.demo.enabled && p.active && p.screenX !== null && p.screenY !== null;
+}
+
+function pruneStalePlayers() {
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active) continue;
+    if (game.demo.enabled && key === "p1") continue;
+    if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) p.active = false;
+  }
+}
+
+function renderGameToText() {
+  return JSON.stringify({
+    coordinate_system: "origin=(top-left), +x right, +y down, pixels",
+    page: "breakout",
+    state: game.state,
+    paused: game.paused,
+    score: floor(game.stats.score),
+    lives: game.stats.lives,
+    level: game.level.number,
+    bricks_alive: game.bricks.filter((b) => b.alive).length,
+    balls: game.balls.length,
+    powerups: game.powerups.length,
+    websocket_connected: game.ws.connected,
+    demo_enabled: game.demo.enabled,
+    players: getActivePlayers().map((p) => ({ label: p.label, x: round(p.screenX), y: round(p.screenY) }))
+  });
+}
+
+function exposeAutomationHooks() {
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms = 16) => new Promise((resolve) => setTimeout(resolve, max(0, ms)));
+}
+
+class LowPassFilter {
+  constructor(alpha, initVal = 0) {
+    this.y = initVal;
+    this.s = initVal;
+    this.initialized = false;
+    this.setAlpha(alpha);
+  }
+  setAlpha(alpha) { this.alpha = alpha; }
+  filter(value) {
+    let result;
+    if (this.initialized) result = this.alpha * value + (1 - this.alpha) * this.s;
+    else { result = value; this.initialized = true; }
+    this.y = value;
+    this.s = result;
+    return result;
+  }
+  hasLastRawValue() { return this.initialized; }
+  lastRawValue() { return this.y; }
+  reset(value = 0) {
+    this.y = value;
+    this.s = value;
+    this.initialized = false;
+  }
+}
+
+class OneEuroFilter {
+  constructor(freq, minCutoff = 1.0, beta = 0.0, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.x = new LowPassFilter(this.alpha(minCutoff));
+    this.dx = new LowPassFilter(this.alpha(dCutoff));
+    this.lastTime = null;
+  }
+  alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+  filter(value, timestamp = null) {
+    if (this.lastTime !== null && timestamp !== null) {
+      const dt = timestamp - this.lastTime;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+    const dValue = this.x.hasLastRawValue() ? (value - this.x.lastRawValue()) * this.freq : 0.0;
+    const edValue = this.dx.filter(dValue);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue);
+    this.x.setAlpha(this.alpha(cutoff));
+    return this.x.filter(value);
+  }
+  reset(value = 0) {
+    this.x.reset(value);
+    this.dx.reset(0);
+    this.lastTime = null;
+  }
+}
+</script>
+</body>
+</html>

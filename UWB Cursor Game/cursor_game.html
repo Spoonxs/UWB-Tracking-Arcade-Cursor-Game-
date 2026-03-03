@@ -1,0 +1,4497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>COSMIC CURSOR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;800&family=Chakra+Petch:wght@400;600;700&family=JetBrains+Mono:wght@500;700&family=M+PLUS+Rounded+1c:wght@500;700&family=Outfit:wght@300;400;600;800;900&family=Space+Grotesk:wght@400;600;700&family=Teko:wght@500;700&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #0a0a0f;
+      font-family: "M PLUS Rounded 1c", "Space Grotesk", sans-serif;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+<script>
+const CONFIG = {
+  WS_URL: "ws://localhost:8765",
+  UWB_BOUNDS: { xMin: 0, xMax: 4, yMin: 0, yMax: 3 },
+  PLAYER_TAGS: { p1: 1, p2: 2 },
+  CURSOR: {
+    size: 24,
+    trailLength: 12,
+    p1Color: [0, 210, 255],
+    p2Color: [255, 50, 200]
+  },
+  GAMEPLAY: {
+    startLives: 3,
+    maxLives: 5,
+    difficultyPerRound: 0.2,
+    directorStartMult: 1,
+    directorMinMult: 0.82,
+    directorMaxMult: 1.75,
+    directorWinStep: 0.045,
+    directorFailStep: 0.08,
+    bossMixUnlockRound: 3,
+    bossMixCadence: 4
+  },
+  COLORS: {
+    bg: [10, 10, 15],
+    green: [34, 197, 94],
+    red: [239, 68, 68],
+    amber: [245, 158, 11],
+    cyan: [0, 210, 255],
+    magenta: [255, 50, 200],
+    lime: [132, 255, 44],
+    orange: [255, 140, 50],
+    white: [255, 255, 255]
+  },
+  DEMO_TIMEOUT_MS: 3000,
+  FILTER: {
+    minCutoff: 1.0,
+    beta: 0.007,
+    dCutoff: 1.0,
+    freq: 20
+  },
+  HARDWARE: {
+    calMinSamples: 30,
+    calMarginRatio: 0.08,
+    calBlend: 0.52,
+    minCalSpanX: 0.35,
+    minCalSpanY: 0.30,
+    mapPadding: 32,
+    postFilterAlpha: 0.34,
+    minPostFilterAlpha: 0.24,
+    maxPostFilterAlpha: 0.56,
+    fastMovePx: 180,
+    fastMoveAlphaBoost: 0.22,
+    microJitterPx: 1.8,
+    microJitterBlend: 0.15,
+    uwbDurationAssist: 1.5,
+    velocityBlend: 0.44,
+    uiHoldMs: 650,
+    cornerCaptureWindowMs: 520,
+    cornerCaptureMinSamples: 4,
+    cornerBoundsMarginRatio: 0.04,
+    dropoutGraceMs: 300,
+    dropoutHoldMs: 900,
+    maxPredictPxPerFrame: 22,
+    predictDamping: 0.9
+  },
+  WORLD_PADDING: 100,
+  PLAYER_ACTIVE_TIMEOUT_MS: 1200,
+  DEFAULT_INPUT_MODE: "auto",
+  BOT_SPEED_PX: 64,
+  BOT_HITBOX_SCALE: 0.48,
+  BOT_EXTRA_LOOKAHEAD_MS: 380,
+  MAP_TRANSITION_MS: 920
+};
+
+const ASSET_PATHS = {
+  coin: "assets/generated/sprites_screen/coin.png",
+  bomb: "assets/generated/sprites_screen/bomb.png",
+  warning: "assets/generated/sprites_screen/warning.png",
+  goal: "assets/generated/sprites_screen/goal.png",
+  checkpoint: "assets/generated/sprites_screen/checkpoint.png",
+  rhythm: "assets/generated/sprites_screen/rhythm.png",
+  skull: "assets/sprites/tabler/skull.svg"
+};
+
+const ASSETS = {};
+const BG_THEMES = [
+  {
+    top: [22, 18, 52],
+    mid: [20, 38, 84],
+    bottom: [15, 24, 56],
+    star: [244, 246, 255],
+    blobs: [[255, 188, 246], [152, 222, 255], [246, 214, 164]]
+  },
+  {
+    top: [16, 26, 60],
+    mid: [16, 52, 90],
+    bottom: [10, 26, 54],
+    star: [232, 244, 255],
+    blobs: [[182, 206, 255], [145, 238, 226], [255, 203, 167]]
+  },
+  {
+    top: [30, 18, 58],
+    mid: [48, 30, 86],
+    bottom: [22, 17, 46],
+    star: [248, 238, 255],
+    blobs: [[248, 166, 216], [166, 210, 255], [250, 223, 184]]
+  },
+  {
+    top: [14, 20, 48],
+    mid: [18, 44, 80],
+    bottom: [12, 18, 44],
+    star: [236, 246, 255],
+    blobs: [[164, 242, 255], [210, 188, 255], [250, 214, 178]]
+  }
+];
+const UI_VARIANTS = [
+  {
+    name: "SOFT",
+    titleFont: "Baloo 2",
+    bodyFont: "M PLUS Rounded 1c",
+    monoFont: "JetBrains Mono",
+    titleScale: 1.0,
+    subtitleScale: 1.0,
+    hudTitleSize: 17,
+    hudStatusSize: 11
+  },
+  {
+    name: "ARCADE",
+    titleFont: "Teko",
+    bodyFont: "Space Grotesk",
+    monoFont: "JetBrains Mono",
+    titleScale: 1.06,
+    subtitleScale: 0.95,
+    hudTitleSize: 18,
+    hudStatusSize: 11
+  },
+  {
+    name: "CUTE",
+    titleFont: "Baloo 2",
+    bodyFont: "Outfit",
+    monoFont: "JetBrains Mono",
+    titleScale: 0.96,
+    subtitleScale: 1.04,
+    hudTitleSize: 16,
+    hudStatusSize: 10
+  }
+];
+const TRANSITION_STYLE_NAMES = ["BLACK HOLE", "WARP STREAKS", "GATE IRIS", "NEBULA CURTAIN"];
+const TRANSITION_STYLE_SEQUENCE_RARE = [1, 2, 3, 1, 3, 2, 1, 2, 0, 3, 2, 1];
+const TRANSITION_STYLE_SEQUENCE_CLEAN = [1, 2, 3, 1, 3, 2, 1, 2, 3, 2, 1, 3];
+const STYLE_GROUP_SCORE_STEP = 1500;
+const STYLE_GROUPS = [
+  {
+    name: "NEON DRIFT",
+    uiVariant: 1,
+    bgOffset: 0,
+    eventOffset: 0,
+    transitionSequence: [1, 2, 3, 1, 2, 3, 0, 1],
+    accent: [85, 240, 255]
+  },
+  {
+    name: "STAR BLOOM",
+    uiVariant: 2,
+    bgOffset: 1,
+    eventOffset: 2,
+    transitionSequence: [3, 1, 2, 3, 1, 0, 2, 3],
+    accent: [255, 196, 120]
+  },
+  {
+    name: "HYPERGATE",
+    uiVariant: 1,
+    bgOffset: 2,
+    eventOffset: 3,
+    transitionSequence: [2, 1, 2, 3, 1, 2, 0, 3],
+    accent: [170, 220, 255]
+  },
+  {
+    name: "VOID CARNIVAL",
+    uiVariant: 0,
+    bgOffset: 3,
+    eventOffset: 1,
+    transitionSequence: [1, 3, 2, 1, 0, 3, 2, 1],
+    accent: [255, 164, 236]
+  }
+];
+const DEATH_MESSAGES = [
+  "Hull breach. Reboot the run.",
+  "Critical failure. Try again.",
+  "System overload. One more go.",
+  "Mission failed. Queue another run.",
+  "That got spicy. Run it back."
+];
+const ROUND_SUCCESS_CALLOUTS = [
+  "Clean!",
+  "Clutch!",
+  "On fire!",
+  "Zero hesitation!",
+  "Perfect tempo!"
+];
+const ROUND_FAIL_CALLOUTS = [
+  "Ouch.",
+  "Too slow.",
+  "Wrong read.",
+  "Pressure got you.",
+  "That one hurt."
+];
+const ROOM_CALIBRATION_STEPS = [
+  { key: "bl", label: "BOTTOM LEFT", short: "BL" },
+  { key: "br", label: "BOTTOM RIGHT", short: "BR" },
+  { key: "tl", label: "TOP LEFT", short: "TL" },
+  { key: "tr", label: "TOP RIGHT", short: "TR" }
+];
+const SHARED_CALIBRATION_KEY = "uwb_room_calibration_v1";
+
+const game = {
+  state: "menu",
+  players: {
+    p1: createPlayer(CONFIG.PLAYER_TAGS.p1, "P1", CONFIG.CURSOR.p1Color),
+    p2: createPlayer(CONFIG.PLAYER_TAGS.p2, "P2", CONFIG.CURSOR.p2Color)
+  },
+  twoPlayerMode: false,
+  score: 0,
+  displayedScore: 0,
+  lives: CONFIG.GAMEPLAY.startLives,
+  round: 0,
+  currentMinigameIndex: 0,
+  minigameOrder: [],
+  minigameStartMs: 0,
+  difficulty: 1,
+  mini: {},
+  ws: {
+    socket: null,
+    connected: false,
+    reconnectTimer: null,
+    lastDataMs: 0,
+    packetCount: 0,
+    parseErrors: 0,
+    lastTag: null
+  },
+  demo: {
+    enabled: true,
+    forced: false,
+    noiseSeedX: Math.random() * 1000,
+    noiseSeedY: Math.random() * 2000
+  },
+  stats: {
+    minigamesSurvived: 0,
+    roundsCompleted: 0,
+    successStreak: 0,
+    bestStreak: 0
+  },
+  effects: {
+    ambientParticles: [],
+    gameParticles: [],
+    floatingScores: [],
+    impactRings: [],
+    shake: { active: false, intensity: 0, startMs: 0, duration: 0 },
+    flash: { active: false, color: [255, 255, 255], startMs: 0, duration: 0, alpha: 120 }
+  },
+  ui: {
+    countdownStartMs: 0,
+    roundResultStartMs: 0,
+    resultStartMs: 0,
+    mapTransitionStartMs: 0,
+    mapTransitionStyleIndex: 0,
+    mapTransitionStep: 0,
+    styleGroupIndex: 0,
+    mapTransitionAnchorX: 0.5,
+    mapTransitionAnchorY: 0.5,
+    backHoverStartMs: 0,
+    calibrateHoverLatched: false,
+    prevMouseDown: false,
+    lastTickMs: 0,
+    lastResult: null,
+    finalMessage: "",
+    variantIndex: 0
+  },
+  runtime: {
+    hoverPulse: 0,
+    frameCounter: 0,
+    started: false,
+    inputMode: CONFIG.DEFAULT_INPUT_MODE,
+    botAssist: false,
+    difficultyMod: CONFIG.GAMEPLAY.directorStartMult,
+    currentDifficulty: 1
+  }
+};
+
+function preload() {
+  for (const [key, path] of Object.entries(ASSET_PATHS)) {
+    ASSETS[key] = loadImage(
+      path,
+      () => {},
+      () => {
+        ASSETS[key] = null;
+      }
+    );
+  }
+}
+
+function createPlayer(tagId, label, rgb) {
+  return {
+    tagId,
+    label,
+    color: rgb,
+    active: false,
+    screenX: null,
+    screenY: null,
+    rawX: 0,
+    rawY: 0,
+    trail: [],
+    filters: {
+      x: null,
+      y: null
+    },
+    velocity: { x: 0, y: 0 },
+    hw: createHardwareState(),
+    lastUpdateMs: 0,
+    hoverActive: false
+  };
+}
+
+function createHardwareState() {
+  return {
+    sampleCount: 0,
+    minX: Infinity,
+    maxX: -Infinity,
+    minY: Infinity,
+    maxY: -Infinity,
+    calReady: false,
+    smoothX: null,
+    smoothY: null,
+    lastPredictMs: 0,
+    rawSamples: [],
+    cornerCal: {
+      active: false,
+      ready: false,
+      step: 0,
+      points: { bl: null, br: null, tl: null, tr: null },
+      bounds: null,
+      lastCaptureMs: 0
+    }
+  };
+}
+
+let minigames = [];
+let runtimeQueryString = "";
+
+function isValidBounds(bounds) {
+  if (!bounds) return false;
+  const xMin = Number(bounds.xMin);
+  const xMax = Number(bounds.xMax);
+  const yMin = Number(bounds.yMin);
+  const yMax = Number(bounds.yMax);
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax) && xMax > xMin && yMax > yMin;
+}
+
+function readSharedCalibrationBounds(tagId = CONFIG.PLAYER_TAGS.p1) {
+  try {
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const byTag = payload && payload.tags ? payload.tags[String(tagId)] : null;
+    if (isValidBounds(byTag)) return byTag;
+    if (isValidBounds(payload && payload.global)) return payload.global;
+  } catch (err) {}
+  return null;
+}
+
+function writeSharedCalibrationBounds(tagId, bounds) {
+  if (!isValidBounds(bounds)) return;
+  try {
+    let payload = { version: 1, updatedAt: Date.now(), tags: {}, global: bounds };
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") payload = { ...payload, ...parsed };
+      if (!payload.tags || typeof payload.tags !== "object") payload.tags = {};
+    }
+    payload.version = 1;
+    payload.updatedAt = Date.now();
+    payload.tags[String(tagId)] = bounds;
+    payload.global = bounds;
+    localStorage.setItem(SHARED_CALIBRATION_KEY, JSON.stringify(payload));
+  } catch (err) {}
+}
+
+function applySharedCalibrationToPlayer(player) {
+  if (!player || !player.hw || !player.hw.cornerCal) return;
+  const bounds = readSharedCalibrationBounds(player.tagId);
+  if (!isValidBounds(bounds)) return;
+  player.hw.cornerCal.bounds = { ...bounds };
+  player.hw.cornerCal.ready = true;
+  player.hw.cornerCal.active = false;
+  player.hw.cornerCal.step = ROOM_CALIBRATION_STEPS.length;
+}
+
+function ensurePlayerFilters(player) {
+  if (player.filters.x && player.filters.y) return;
+  player.filters.x = new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff);
+  player.filters.y = new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff);
+}
+
+function initializePlayerFilters() {
+  ensurePlayerFilters(game.players.p1);
+  ensurePlayerFilters(game.players.p2);
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  textFont("M PLUS Rounded 1c");
+  applyURLOverrides();
+  initializePlayerFilters();
+  initializeAmbientParticles();
+  buildMinigames();
+  resetGameState();
+  connectWebSocket();
+  exposeAutomationHooks();
+}
+
+function draw() {
+  game.runtime.frameCounter++;
+  game.runtime.hoverPulse = (sin(millis() * 0.01) + 1) * 0.5;
+  updateDemoMode();
+  applyHardwareDropoutFallback();
+  pruneStalePlayers();
+  updatePlayersTrails();
+  updateEffects();
+  updateStyleGroupByScore();
+
+  const bg = CONFIG.COLORS.bg;
+  background(bg[0], bg[1], bg[2]);
+  drawAtmosphere();
+  drawBackgroundGrid();
+  drawAmbientParticles();
+
+  push();
+  applyScreenShake();
+
+  if (game.state === "menu") {
+    drawMenu();
+  } else if (game.state === "countdown") {
+    drawCountdown();
+  } else if (game.state === "playing") {
+    updateAndDrawPlayingState();
+  } else if (game.state === "round_result") {
+    drawRoundResult();
+  } else if (game.state === "results") {
+    drawResults();
+  } else {
+    drawLoading();
+  }
+
+  drawGameParticles();
+  drawImpactRings();
+  drawFloatingScores();
+  drawCursors();
+  pop();
+
+  drawMapTransitionOverlay();
+  drawConnectionIndicator();
+  drawDemoBadge();
+  drawCalibrationGuide();
+  drawScreenFlash();
+  drawBackToMenuButton();
+  drawCalibrationButton();
+  game.ui.prevMouseDown = mouseIsPressed;
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  initializeAmbientParticles();
+  if (game.state === "playing" && currentMinigame()) {
+    const mg = currentMinigame();
+    if (mg.name === "WHACK-A-MOLE") {
+      mg.setup(game.runtime.currentDifficulty || game.difficulty);
+      setupBossMixForCurrentMinigame(game.runtime.currentDifficulty || game.difficulty);
+    }
+  }
+}
+
+function drawLoading() {
+  fill(255, 220);
+  textAlign(CENTER, CENTER);
+  textSize(42);
+  text("Loading...", width / 2, height / 2);
+}
+
+function initializeAmbientParticles() {
+  game.effects.ambientParticles = [];
+  for (let i = 0; i < 50; i++) {
+    game.effects.ambientParticles.push(makeAmbientParticle(true));
+  }
+}
+
+function makeAmbientParticle(randomY = false) {
+  return {
+    x: random(width),
+    y: randomY ? random(height) : height + random(20, 220),
+    vx: random(-0.25, 0.25),
+    vy: random(-0.55, -0.12),
+    size: random(1, 3),
+    alpha: random(15, 50)
+  };
+}
+
+function drawAmbientParticles() {
+  noStroke();
+  for (let p of game.effects.ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.y < -10) {
+      Object.assign(p, makeAmbientParticle(false));
+    }
+    if (p.x < -10) p.x = width + 10;
+    if (p.x > width + 10) p.x = -10;
+    fill(255, p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function drawBackgroundGrid() {
+  noStroke();
+  for (let i = 0; i < 40; i++) {
+    const x = ((i * 97.3) % 1) * width;
+    const y = ((i * 43.9) % 1) * height;
+    fill(255, 42);
+    circle(x, y, 1.6);
+  }
+}
+
+function drawAtmosphere() {
+  const theme = currentBackgroundTheme();
+  const group = currentStyleGroup();
+  const top = color(theme.top[0], theme.top[1], theme.top[2]);
+  const mid = color(theme.mid[0], theme.mid[1], theme.mid[2]);
+  const bottom = color(theme.bottom[0], theme.bottom[1], theme.bottom[2]);
+  noStroke();
+  for (let i = 0; i < 20; i++) {
+    const t = i / 19;
+    const c = t < 0.55 ? lerpColor(top, mid, t / 0.55) : lerpColor(mid, bottom, (t - 0.55) / 0.45);
+    fill(c);
+    rect(0, (height / 20) * i, width, height / 20 + 1);
+  }
+
+  const t = millis() * 0.0002;
+  const b1 = theme.blobs[0];
+  const b2 = theme.blobs[1];
+  const b3 = theme.blobs[2];
+  fill(b1[0], b1[1], b1[2], 70);
+  circle(width * 0.2 + sin(t * 11) * width * 0.045, height * 0.22 + cos(t * 13) * height * 0.04, min(width, height) * 0.18);
+  fill(b2[0], b2[1], b2[2], 66);
+  circle(width * 0.82 + cos(t * 9) * width * 0.05, height * 0.18 + sin(t * 8) * height * 0.04, min(width, height) * 0.15);
+  fill(b3[0], b3[1], b3[2], 65);
+  circle(width * 0.72 + sin(t * 7) * width * 0.04, height * 0.78 + cos(t * 9) * height * 0.04, min(width, height) * 0.13);
+
+  for (let i = 0; i < 90; i++) {
+    const sx = ((i * 127.1) % 1) * width;
+    const sy = ((i * 73.7) % 1) * height;
+    const tw = 0.35 + 0.65 * abs(sin(millis() * 0.0012 + i * 1.9));
+    fill(theme.star[0], theme.star[1], theme.star[2], 200 * tw);
+    circle(sx, sy, 1.2 + (i % 3) * 0.7);
+  }
+
+  drawStyleGroupAccent(group);
+  drawRoundEventLayer(theme);
+}
+
+function drawStyleGroupAccent(group) {
+  if (!group) return;
+  const t = millis() * 0.001;
+  noFill();
+  if (group.name === "NEON DRIFT") {
+    stroke(group.accent[0], group.accent[1], group.accent[2], 52);
+    strokeWeight(2);
+    for (let i = 0; i < 5; i++) {
+      const y = height * (0.2 + i * 0.15) + sin(t * 2 + i * 1.1) * 10;
+      line(0, y, width, y + 16);
+    }
+    return;
+  }
+  if (group.name === "STAR BLOOM") {
+    stroke(group.accent[0], group.accent[1], group.accent[2], 44);
+    strokeWeight(1.6);
+    for (let i = 0; i < 28; i++) {
+      const a = t + i * 0.23;
+      const x = width * 0.5 + cos(a) * width * 0.34;
+      const y = height * 0.5 + sin(a * 1.2) * height * 0.28;
+      circle(x, y, 10 + (i % 4) * 5);
+    }
+    return;
+  }
+  if (group.name === "HYPERGATE") {
+    stroke(group.accent[0], group.accent[1], group.accent[2], 42);
+    strokeWeight(2);
+    rectMode(CENTER);
+    for (let i = 0; i < 4; i++) {
+      const s = min(width, height) * (0.38 + i * 0.1) + sin(t * 1.5 + i) * 20;
+      rect(width * 0.5, height * 0.5, s * 1.4, s * 0.85, 18);
+    }
+    rectMode(CORNER);
+    return;
+  }
+  stroke(group.accent[0], group.accent[1], group.accent[2], 45);
+  strokeWeight(1.8);
+  for (let i = 0; i < 18; i++) {
+    const x = ((i * 89.7 + millis() * 0.03) % (width + 120)) - 60;
+    const y = ((i * 57.1 + millis() * 0.02) % (height + 120)) - 60;
+    line(x - 10, y, x + 10, y);
+    line(x, y - 10, x, y + 10);
+  }
+}
+
+function currentBackgroundTheme() {
+  const total = BG_THEMES.length;
+  if (!total) return BG_THEMES[0];
+  const group = currentStyleGroup();
+  const offset = group ? group.bgOffset : 0;
+  let idx = 0;
+  if (game.state === "playing" || game.state === "round_result") {
+    idx = (game.round + game.currentMinigameIndex + offset) % total;
+  } else if (game.state === "results") {
+    idx = (game.round + 1 + offset) % total;
+  } else {
+    idx = offset % total;
+  }
+  return BG_THEMES[(idx + total) % total];
+}
+
+function currentRoundEventIndex() {
+  const eventCount = 6;
+  const group = currentStyleGroup();
+  const offset = group ? group.eventOffset : 0;
+  if (game.state === "playing" || game.state === "round_result" || game.state === "results") {
+    return (((game.round + offset) % eventCount) + eventCount) % eventCount;
+  }
+  const preview = floor(millis() / 10000);
+  return (preview + offset) % eventCount;
+}
+
+function drawRoundEventLayer(theme) {
+  const idx = currentRoundEventIndex();
+  if (idx === 0) {
+    drawEventComets(theme);
+  } else if (idx === 1) {
+    drawEventUfoParade(theme);
+  } else if (idx === 2) {
+    drawEventWormholes(theme);
+  } else if (idx === 3) {
+    drawEventCosmicCritters(theme);
+  } else if (idx === 4) {
+    drawEventMeteorDrift(theme);
+  } else {
+    drawEventSatellites(theme);
+  }
+}
+
+function drawEventComets(theme) {
+  const t = millis() * 0.16;
+  strokeWeight(2.4);
+  for (let i = 0; i < 8; i++) {
+    const x = ((t + i * 210) % (width + 260)) - 130;
+    const y = (i * 113 + millis() * 0.015) % (height + 120) - 60;
+    stroke(theme.star[0], theme.star[1], theme.star[2], 85);
+    line(x - 46, y - 22, x + 16, y + 8);
+    noStroke();
+    fill(theme.star[0], theme.star[1], theme.star[2], 145);
+    circle(x + 18, y + 9, 4.8);
+  }
+}
+
+function drawEventUfoParade(theme) {
+  const t = millis() * 0.001;
+  const c = theme.blobs[1];
+  for (let i = 0; i < 5; i++) {
+    const x = (width * (i + 0.5) / 5) + sin(t * 1.3 + i * 1.7) * 54;
+    const y = height * 0.22 + cos(t * 1.6 + i * 2.1) * 26;
+    noStroke();
+    fill(c[0], c[1], c[2], 100);
+    ellipse(x, y, 68, 26);
+    fill(235, 245, 255, 140);
+    ellipse(x, y - 8, 26, 16);
+    fill(255, 255, 210, 80);
+    triangle(x - 10, y + 10, x + 10, y + 10, x, y + 40);
+  }
+}
+
+function drawEventWormholes(theme) {
+  const t = millis() * 0.0014;
+  const a = theme.blobs[0];
+  const b = theme.blobs[2];
+  const spots = [
+    { x: width * 0.18, y: height * 0.68, c: a },
+    { x: width * 0.78, y: height * 0.34, c: b }
+  ];
+  noFill();
+  for (const s of spots) {
+    for (let i = 0; i < 4; i++) {
+      const r = 28 + i * 18 + sin(t * 2 + i) * 6;
+      stroke(s.c[0], s.c[1], s.c[2], 48 - i * 8);
+      strokeWeight(2);
+      circle(s.x, s.y, r * 2);
+    }
+  }
+}
+
+function drawEventCosmicCritters(theme) {
+  const t = millis() * 0.0012;
+  const c = theme.blobs[0];
+  for (let i = 0; i < 3; i++) {
+    const x = width * (0.22 + i * 0.28) + sin(t * 1.1 + i * 2.5) * 38;
+    const y = height * (0.72 - i * 0.18) + cos(t * 1.4 + i * 1.7) * 24;
+    noStroke();
+    fill(c[0], c[1], c[2], 78);
+    circle(x, y, 54);
+    fill(255, 245, 255, 120);
+    circle(x - 9, y - 4, 10);
+    circle(x + 9, y - 4, 10);
+    fill(60, 40, 80, 130);
+    circle(x - 9, y - 4, 4.2);
+    circle(x + 9, y - 4, 4.2);
+    stroke(255, 220, 240, 120);
+    strokeWeight(2);
+    line(x - 7, y + 9, x + 7, y + 9);
+  }
+}
+
+function drawEventMeteorDrift(theme) {
+  const t = millis() * 0.09;
+  const cols = [theme.blobs[0], theme.blobs[1], theme.blobs[2]];
+  for (let i = 0; i < 12; i++) {
+    const x = ((t + i * 178) % (width + 180)) - 90;
+    const y = ((i * 121 + millis() * 0.02) % (height + 120)) - 60;
+    const col = cols[i % cols.length];
+    stroke(col[0], col[1], col[2], 72);
+    strokeWeight(2);
+    line(x - 34, y - 14, x + 8, y + 4);
+    noStroke();
+    fill(col[0], col[1], col[2], 130);
+    ellipse(x + 12, y + 6, 16, 10);
+  }
+}
+
+function drawMapTransitionOverlay() {
+  const startMs = game.ui.mapTransitionStartMs;
+  if (!startMs) return;
+  const elapsed = millis() - startMs;
+  const duration = CONFIG.MAP_TRANSITION_MS;
+  const t = constrain(elapsed / duration, 0, 1);
+  if (t >= 1) {
+    game.ui.mapTransitionStartMs = 0;
+    return;
+  }
+
+  const pulse = sin(t * PI);
+  const cx = width * game.ui.mapTransitionAnchorX;
+  const cy = height * game.ui.mapTransitionAnchorY;
+  const base = min(width, height);
+  const styleCount = 4;
+  const style = ((game.ui.mapTransitionStyleIndex % styleCount) + styleCount) % styleCount;
+
+  noStroke();
+  fill(4, 5, 12, 45 + 175 * pulse);
+  rect(0, 0, width, height);
+
+  if (style === 0) {
+    drawTransitionBlackHole(t, pulse, cx, cy, base);
+  } else if (style === 1) {
+    drawTransitionWarpStreaks(t, pulse, cx, cy, base);
+  } else if (style === 2) {
+    drawTransitionGateIris(t, pulse, cx, cy, base);
+  } else {
+    drawTransitionNebulaCurtain(t, pulse, cx, cy, base);
+  }
+
+  fill(235, 245, 255, 160 * (1 - t));
+  textAlign(CENTER, TOP);
+  textSize(12);
+  textStyle(700);
+  text(transitionStyleName(style), width * 0.5, 18);
+}
+
+function drawTransitionBlackHole(t, pulse, cx, cy, base) {
+  const p = 1 - pow(1 - t, 3);
+  const coreR = base * (0.02 + pulse * 0.34);
+
+  push();
+  translate(cx, cy);
+  rotate(-t * 1.8);
+  noFill();
+  for (let i = 0; i < 6; i++) {
+    const r = coreR + i * base * 0.055;
+    const alpha = (1 - i / 6) * 135 * (1 - t * 0.9);
+    stroke(50, 240, 255, alpha);
+    strokeWeight(2 + i * 0.4);
+    arc(0, 0, r * 2, r * 2, i * 0.4, i * 0.4 + PI * 1.2);
+    stroke(255, 172, 88, alpha * 0.8);
+    arc(0, 0, r * 2.15, r * 2.15, i * 0.4 + PI * 1.1, i * 0.4 + PI * 1.8);
+  }
+  for (let i = 0; i < 30; i++) {
+    const ang = (TWO_PI * i) / 30 + t * 4;
+    const outer = base * (0.45 + (i % 5) * 0.04);
+    const inner = coreR * 0.55;
+    const x1 = cos(ang) * outer;
+    const y1 = sin(ang) * outer;
+    const x2 = cos(ang + 0.08) * inner;
+    const y2 = sin(ang + 0.08) * inner;
+    stroke(220, 245, 255, 34 + 110 * (1 - p));
+    strokeWeight(1.4);
+    line(x1, y1, x2, y2);
+  }
+  pop();
+
+  noStroke();
+  fill(2, 2, 6, 236);
+  circle(cx, cy, coreR * 1.15);
+  stroke(60, 245, 255, 160 * (1 - t));
+  strokeWeight(3.2);
+  noFill();
+  circle(cx, cy, coreR * 1.35);
+}
+
+function drawTransitionWarpStreaks(t, pulse, cx, cy, base) {
+  const focus = base * (0.04 + 0.14 * pulse);
+  push();
+  translate(cx, cy);
+  rotate(0.45 + t * 1.6);
+  for (let i = 0; i < 56; i++) {
+    const ang = (TWO_PI * i) / 56;
+    const outer = base * (0.52 + (i % 6) * 0.04);
+    const inner = focus + (i % 4) * 3;
+    const x1 = cos(ang) * outer;
+    const y1 = sin(ang) * outer;
+    const x2 = cos(ang + 0.05 * sin(t * 8 + i)) * inner;
+    const y2 = sin(ang + 0.05 * sin(t * 8 + i)) * inner;
+    stroke(70, 238, 255, 40 + 120 * (1 - t));
+    strokeWeight(1 + (i % 3) * 0.6);
+    line(x1, y1, x2, y2);
+    if (i % 2 === 0) {
+      stroke(255, 176, 92, 28 + 85 * (1 - t));
+      strokeWeight(1.1);
+      line(x1 * 0.85, y1 * 0.85, x2, y2);
+    }
+  }
+  pop();
+
+  noFill();
+  stroke(94, 245, 255, 140 * (1 - t));
+  strokeWeight(3);
+  circle(cx, cy, focus * 2.8);
+  stroke(255, 179, 103, 110 * (1 - t));
+  circle(cx, cy, focus * 3.7);
+}
+
+function drawTransitionGateIris(t, pulse, cx, cy, base) {
+  const close = sin(t * PI);
+  const sideW = width * (0.02 + close * 0.23);
+  const topH = height * (0.02 + close * 0.19);
+
+  noStroke();
+  fill(8, 11, 28, 220 * close);
+  rect(0, 0, sideW, height);
+  rect(width - sideW, 0, sideW, height);
+  rect(0, 0, width, topH);
+  rect(0, height - topH, width, topH);
+
+  push();
+  translate(cx, cy);
+  rotate(-t * 2.1);
+  noFill();
+  const rings = 4;
+  for (let i = 0; i < rings; i++) {
+    const rr = base * (0.1 + i * 0.09 + close * 0.06);
+    const alpha = (1 - i / rings) * (150 - t * 90);
+    stroke(74, 244, 255, alpha);
+    strokeWeight(2.4 - i * 0.3);
+    beginShape();
+    for (let j = 0; j < 6; j++) {
+      const a = (TWO_PI * j) / 6;
+      vertex(cos(a) * rr, sin(a) * rr);
+    }
+    endShape(CLOSE);
+    stroke(255, 170, 86, alpha * 0.7);
+    arc(0, 0, rr * 2.2, rr * 2.2, i * 0.8, i * 0.8 + PI * 0.9);
+  }
+  pop();
+
+  const core = base * (0.04 + close * 0.12);
+  noStroke();
+  fill(28, 42, 74, 200);
+  circle(cx, cy, core * 2);
+  stroke(92, 244, 255, 120 * (1 - t));
+  noFill();
+  strokeWeight(2.8);
+  circle(cx, cy, core * 2.4);
+}
+
+function drawTransitionNebulaCurtain(t, pulse, cx, cy, base) {
+  const wave = sin(t * PI);
+  const spread = base * (0.25 + wave * 0.42);
+  const offsetX = width * (0.25 - wave * 0.18);
+  const offsetY = height * (0.2 - wave * 0.15);
+
+  noStroke();
+  fill(65, 238, 255, 28 + 96 * wave);
+  circle(cx - offsetX, cy - offsetY, spread * 1.9);
+  fill(255, 170, 90, 24 + 90 * wave);
+  circle(cx + offsetX * 0.96, cy + offsetY * 0.78, spread * 1.8);
+  fill(152, 205, 255, 30 + 80 * wave);
+  circle(cx - offsetX * 0.55, cy + offsetY * 0.92, spread * 1.35);
+  fill(255, 214, 150, 22 + 72 * wave);
+  circle(cx + offsetX * 0.68, cy - offsetY * 0.82, spread * 1.2);
+
+  push();
+  translate(cx, cy);
+  rotate(t * 1.5);
+  noFill();
+  for (let i = 0; i < 5; i++) {
+    const rr = base * (0.13 + i * 0.08 + wave * 0.07);
+    stroke(92, 244, 255, (1 - i / 5) * 85);
+    strokeWeight(1.8);
+    ellipse(0, 0, rr * 2.2, rr * 1.25);
+    stroke(255, 176, 92, (1 - i / 5) * 70);
+    ellipse(0, 0, rr * 1.45, rr * 2.25);
+  }
+  pop();
+
+  const core = base * (0.03 + pulse * 0.09);
+  push();
+  translate(cx, cy);
+  rotate(t * 2.2);
+  noStroke();
+  fill(88, 234, 255, 130);
+  beginShape();
+  vertex(0, -core * 1.4);
+  vertex(core * 1.05, 0);
+  vertex(0, core * 1.4);
+  vertex(-core * 1.05, 0);
+  endShape(CLOSE);
+  pop();
+}
+
+function drawEventSatellites(theme) {
+  const t = millis() * 0.001;
+  const c = theme.star;
+  for (let i = 0; i < 4; i++) {
+    const x = width * (0.16 + i * 0.22) + sin(t * 1.2 + i) * 64;
+    const y = height * (0.36 + (i % 2) * 0.2) + cos(t * 1.1 + i * 0.8) * 26;
+    stroke(c[0], c[1], c[2], 120);
+    strokeWeight(2);
+    line(x - 24, y, x + 24, y);
+    noStroke();
+    fill(210, 228, 255, 140);
+    rect(x - 10, y - 8, 20, 16, 4);
+    fill(theme.blobs[1][0], theme.blobs[1][1], theme.blobs[1][2], 120);
+    rect(x - 30, y - 6, 12, 12, 2);
+    rect(x + 18, y - 6, 12, 12, 2);
+  }
+}
+
+function currentUIVariant() {
+  const total = UI_VARIANTS.length;
+  const group = currentStyleGroup();
+  const base = group ? group.uiVariant : 0;
+  const idx = (((base + game.ui.variantIndex) % total) + total) % total;
+  return UI_VARIANTS[idx];
+}
+
+function getAsset(name) {
+  return ASSETS[name] || null;
+}
+
+function drawSpriteCentered(name, x, y, size, alpha = 255, rotation = 0) {
+  const img = getAsset(name);
+  if (!img) return false;
+  push();
+  translate(x, y);
+  rotate(rotation);
+  imageMode(CENTER);
+  tint(255, alpha);
+  image(img, 0, 0, size, size);
+  pop();
+  return true;
+}
+
+function drawSpriteScreen(name, x, y, size, alpha = 255, rotation = 0) {
+  const img = getAsset(name);
+  if (!img) return false;
+  push();
+  imageMode(CENTER);
+  translate(x, y);
+  rotate(rotation);
+  blendMode(SCREEN);
+  tint(255, alpha);
+  image(img, 0, 0, size, size);
+  blendMode(BLEND);
+  pop();
+  return true;
+}
+
+function connectWebSocket() {
+  if (game.ws.socket) {
+    try { game.ws.socket.close(); } catch (err) {}
+  }
+
+  try {
+    const ws = new WebSocket(CONFIG.WS_URL);
+    game.ws.socket = ws;
+
+    ws.onopen = () => {
+      game.ws.connected = true;
+      game.ws.lastDataMs = millis();
+    };
+
+    ws.onmessage = (evt) => {
+      handleWebSocketMessage(evt.data);
+    };
+
+    ws.onerror = () => {
+      game.ws.connected = false;
+    };
+
+    ws.onclose = () => {
+      game.ws.connected = false;
+      scheduleReconnect();
+    };
+  } catch (err) {
+    game.ws.connected = false;
+    scheduleReconnect();
+  }
+}
+
+function scheduleReconnect() {
+  if (game.ws.reconnectTimer) {
+    clearTimeout(game.ws.reconnectTimer);
+  }
+  game.ws.reconnectTimer = setTimeout(() => connectWebSocket(), 1000);
+}
+
+function handleWebSocketMessage(raw) {
+  game.ws.packetCount++;
+  game.ws.lastDataMs = millis();
+
+  if (game.runtime.inputMode === "mouse") {
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch (err) {
+    game.ws.parseErrors++;
+    return;
+  }
+
+  const tags = normalizeTags(payload);
+  for (const tag of tags) {
+    const id = Number(tag.id ?? tag.tagId ?? tag.tag_id);
+    if (!Number.isFinite(id)) continue;
+
+    const playerKey = getPlayerKeyByTag(id);
+    if (!playerKey) continue;
+
+    const x = Number(tag.x ?? tag.posX ?? tag.pos_x);
+    const y = Number(tag.y ?? tag.posY ?? tag.pos_y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+    game.ws.lastTag = { id, x, y, ms: millis() };
+    updatePlayerFromUWB(playerKey, x, y);
+  }
+}
+
+function normalizeTags(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.tags)) return payload.tags;
+  if (payload.tag) return [payload.tag];
+  if (payload.id !== undefined && payload.x !== undefined && payload.y !== undefined) return [payload];
+  return [];
+}
+
+function getPlayerKeyByTag(id) {
+  if (id === game.players.p1.tagId) return "p1";
+  if (id === game.players.p2.tagId) return "p2";
+  return null;
+}
+
+function effectiveUwbBounds(player) {
+  const base = CONFIG.UWB_BOUNDS;
+  const sharedBounds = player ? readSharedCalibrationBounds(player.tagId) : null;
+  if (isValidBounds(sharedBounds)) return sharedBounds;
+  const cornerBounds = player && player.hw && player.hw.cornerCal ? player.hw.cornerCal.bounds : null;
+  if (cornerBounds && Number.isFinite(cornerBounds.xMin) && Number.isFinite(cornerBounds.xMax) && Number.isFinite(cornerBounds.yMin) && Number.isFinite(cornerBounds.yMax)) {
+    return cornerBounds;
+  }
+  if (!player || !player.hw || !player.hw.calReady) return base;
+
+  const hw = player.hw;
+  const spanX = hw.maxX - hw.minX;
+  const spanY = hw.maxY - hw.minY;
+  if (spanX < CONFIG.HARDWARE.minCalSpanX || spanY < CONFIG.HARDWARE.minCalSpanY) return base;
+
+  const mx = max(0.05, spanX * CONFIG.HARDWARE.calMarginRatio);
+  const my = max(0.05, spanY * CONFIG.HARDWARE.calMarginRatio);
+  const rawMinX = hw.minX - mx;
+  const rawMaxX = hw.maxX + mx;
+  const rawMinY = hw.minY - my;
+  const rawMaxY = hw.maxY + my;
+  const blend = CONFIG.HARDWARE.calBlend;
+
+  return {
+    xMin: lerp(base.xMin, rawMinX, blend),
+    xMax: lerp(base.xMax, rawMaxX, blend),
+    yMin: lerp(base.yMin, rawMinY, blend),
+    yMax: lerp(base.yMax, rawMaxY, blend)
+  };
+}
+
+function mapUWBToScreen(x, y, player = null) {
+  const b = effectiveUwbBounds(player);
+  const shared = player ? readSharedCalibrationBounds(player.tagId) : null;
+  const hasCalibratedBounds = isValidBounds(shared) || (player && player.hw && player.hw.cornerCal && isValidBounds(player.hw.cornerCal.bounds));
+  const padRaw = hasCalibratedBounds ? 0 : (CONFIG.HARDWARE.mapPadding ?? CONFIG.WORLD_PADDING);
+  const pad = constrain(padRaw, 0, min(width, height) * 0.25);
+  const px = map(x, b.xMin, b.xMax, pad, width - pad, true);
+  const py = map(y, b.yMin, b.yMax, height - pad, pad, true);
+  return { x: px, y: py };
+}
+
+function updatePlayerCalibration(player, uwbX, uwbY) {
+  if (player.hw.cornerCal && player.hw.cornerCal.ready) return;
+  const hw = player.hw;
+  hw.sampleCount++;
+  hw.minX = min(hw.minX, uwbX);
+  hw.maxX = max(hw.maxX, uwbX);
+  hw.minY = min(hw.minY, uwbY);
+  hw.maxY = max(hw.maxY, uwbY);
+  const spanX = hw.maxX - hw.minX;
+  const spanY = hw.maxY - hw.minY;
+  hw.calReady = hw.sampleCount >= CONFIG.HARDWARE.calMinSamples && spanX >= CONFIG.HARDWARE.minCalSpanX && spanY >= CONFIG.HARDWARE.minCalSpanY;
+}
+
+function pushRawSample(player, rawX, rawY) {
+  const hw = player.hw;
+  if (!hw.rawSamples) hw.rawSamples = [];
+  hw.rawSamples.push({ x: rawX, y: rawY, ms: millis() });
+  if (hw.rawSamples.length > 48) {
+    hw.rawSamples.splice(0, hw.rawSamples.length - 48);
+  }
+}
+
+function updatePlayerFromUWB(playerKey, uwbX, uwbY) {
+  const p = game.players[playerKey];
+  ensurePlayerFilters(p);
+  pushRawSample(p, uwbX, uwbY);
+  updatePlayerCalibration(p, uwbX, uwbY);
+  const nowSec = millis() * 0.001;
+  const screen = mapUWBToScreen(uwbX, uwbY, p);
+
+  const filteredX = p.filters.x.filter(screen.x, nowSec);
+  const filteredY = p.filters.y.filter(screen.y, nowSec);
+
+  let targetX = filteredX;
+  let targetY = filteredY;
+
+  const alphaBase = CONFIG.HARDWARE.postFilterAlpha;
+  const alphaMin = CONFIG.HARDWARE.minPostFilterAlpha;
+  const alphaMax = CONFIG.HARDWARE.maxPostFilterAlpha;
+  const fastMovePx = max(1, CONFIG.HARDWARE.fastMovePx);
+  const boost = CONFIG.HARDWARE.fastMoveAlphaBoost;
+  const jitterPx = max(0, CONFIG.HARDWARE.microJitterPx);
+  const jitterBlend = CONFIG.HARDWARE.microJitterBlend;
+
+  if (p.hw.smoothX === null || p.hw.smoothY === null) {
+    p.hw.smoothX = targetX;
+    p.hw.smoothY = targetY;
+  } else {
+    const travel = dist(p.hw.smoothX, p.hw.smoothY, targetX, targetY);
+    if (travel < jitterPx) {
+      targetX = lerp(p.hw.smoothX, targetX, jitterBlend);
+      targetY = lerp(p.hw.smoothY, targetY, jitterBlend);
+    }
+    const moveRatio = constrain(travel / fastMovePx, 0, 1);
+    const alpha = constrain(alphaBase + moveRatio * boost, alphaMin, alphaMax);
+    p.hw.smoothX = lerp(p.hw.smoothX, targetX, alpha);
+    p.hw.smoothY = lerp(p.hw.smoothY, targetY, alpha);
+  }
+
+  const now = millis();
+  if (p.screenX !== null && p.screenY !== null && p.lastUpdateMs > 0) {
+    const dtFrames = max(1, (now - p.lastUpdateMs) / 16.666);
+    const vx = (p.hw.smoothX - p.screenX) / dtFrames;
+    const vy = (p.hw.smoothY - p.screenY) / dtFrames;
+    p.velocity.x = lerp(p.velocity.x, vx, CONFIG.HARDWARE.velocityBlend);
+    p.velocity.y = lerp(p.velocity.y, vy, CONFIG.HARDWARE.velocityBlend);
+  }
+
+  p.screenX = p.hw.smoothX;
+  p.screenY = p.hw.smoothY;
+  p.rawX = uwbX;
+  p.rawY = uwbY;
+  p.active = true;
+  p.lastUpdateMs = now;
+  p.hw.lastPredictMs = now;
+}
+
+function updateDemoMode() {
+  const mode = game.runtime.inputMode;
+  if (game.runtime.botAssist) {
+    game.demo.enabled = true;
+  } else if (mode === "mouse") {
+    game.demo.enabled = true;
+  } else if (mode === "tag") {
+    game.demo.enabled = false;
+  } else if (game.demo.forced) {
+    game.demo.enabled = true;
+  } else {
+    const noData = millis() - game.ws.lastDataMs > CONFIG.DEMO_TIMEOUT_MS;
+    game.demo.enabled = !game.ws.connected || noData;
+  }
+
+  if (!game.demo.enabled) return;
+
+  const p1 = game.players.p1;
+  ensurePlayerFilters(p1);
+
+  const startX = p1.screenX === null ? width * 0.5 : p1.screenX;
+  const startY = p1.screenY === null ? height * 0.5 : p1.screenY;
+  let mx;
+  let my;
+
+  if (game.runtime.botAssist) {
+    const botTarget = getBotAssistTarget(startX, startY);
+    const effDifficulty = game.runtime.currentDifficulty || getEffectiveDifficulty();
+    const speed = CONFIG.BOT_SPEED_PX + Math.max(0, effDifficulty - 1) * 8;
+    const moved = moveToward(startX, startY, botTarget.x, botTarget.y, speed);
+    mx = constrain(moved.x, 0, width);
+    my = constrain(moved.y, 0, height);
+  } else {
+    // Keep mouse control snappy for playtesting.
+    mx = constrain(mouseX, 0, width);
+    my = constrain(mouseY, 0, height);
+  }
+  const nowSec = millis() * 0.001;
+
+  if (game.runtime.botAssist) {
+    // Keep bot response immediate enough for high-density hazard rounds.
+    p1.screenX = lerp(startX, mx, 0.84);
+    p1.screenY = lerp(startY, my, 0.84);
+  } else {
+    p1.screenX = mx;
+    p1.screenY = my;
+  }
+  p1.velocity.x = lerp(p1.velocity.x, p1.screenX - startX, 0.45);
+  p1.velocity.y = lerp(p1.velocity.y, p1.screenY - startY, 0.45);
+  p1.active = true;
+  p1.lastUpdateMs = millis();
+
+  const p2 = game.players.p2;
+  if (millis() - p2.lastUpdateMs > CONFIG.DEMO_TIMEOUT_MS || mode === "mouse") {
+    p2.active = false;
+  }
+}
+
+function applyHardwareDropoutFallback() {
+  if (game.demo.enabled) return;
+  if (game.runtime.inputMode !== "tag" && game.runtime.inputMode !== "auto") return;
+
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (p.screenX === null || p.screenY === null) continue;
+    if (p.lastUpdateMs <= 0) continue;
+
+    const staleMs = now - p.lastUpdateMs;
+    if (staleMs <= CONFIG.HARDWARE.dropoutGraceMs) {
+      p.hw.lastPredictMs = now;
+      continue;
+    }
+    if (staleMs > CONFIG.HARDWARE.dropoutHoldMs) {
+      continue;
+    }
+
+    const lastPred = p.hw.lastPredictMs || p.lastUpdateMs;
+    const dt = max(0, now - lastPred);
+    p.hw.lastPredictMs = now;
+    if (dt <= 0) continue;
+
+    const step = min(CONFIG.HARDWARE.maxPredictPxPerFrame, dt / 16.666);
+    p.screenX = constrain(p.screenX + p.velocity.x * step, 0, width);
+    p.screenY = constrain(p.screenY + p.velocity.y * step, 0, height);
+    p.velocity.x *= CONFIG.HARDWARE.predictDamping;
+    p.velocity.y *= CONFIG.HARDWARE.predictDamping;
+    p.active = true;
+  }
+}
+
+function pruneStalePlayers() {
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active) continue;
+
+    if (game.demo.enabled && key === "p1") {
+      continue;
+    }
+    if (game.twoPlayerMode && key === "p2") {
+      if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) p.active = false;
+      continue;
+    }
+    if (key === "p2" && !game.twoPlayerMode) {
+      p.active = false;
+      continue;
+    }
+
+    if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) {
+      p.active = false;
+    }
+  }
+}
+
+function renderGameToText() {
+  const activePlayers = activePlayersForMode().map((p) => ({
+    label: p.label,
+    x: p.screenX,
+    y: p.screenY,
+    active: p.active
+  }));
+  const mg = currentMinigame();
+  const g = currentStyleGroup();
+  const payload = {
+    coordinate_system: "origin=(top-left), +x right, +y down, pixels",
+    state: game.state,
+    score: game.score,
+    lives: game.lives,
+    round: game.round + 1,
+    difficulty: Number(game.difficulty.toFixed(3)),
+    effective_difficulty: Number((game.runtime.currentDifficulty || game.difficulty).toFixed(3)),
+    two_player_mode: game.twoPlayerMode,
+    input_mode: game.runtime.inputMode,
+    bot_assist: game.runtime.botAssist,
+    style_group: g ? g.name : null,
+    transition_style: transitionStyleName(game.ui.mapTransitionStyleIndex),
+    hardware: {
+      p1_cal_samples: game.players.p1.hw.sampleCount,
+      p2_cal_samples: game.players.p2.hw.sampleCount,
+      p1_cal_ready: game.players.p1.hw.calReady,
+      p2_cal_ready: game.players.p2.hw.calReady,
+      p1_corner_cal_active: game.players.p1.hw.cornerCal.active,
+      p1_corner_cal_ready: game.players.p1.hw.cornerCal.ready,
+      p1_corner_cal_step: game.players.p1.hw.cornerCal.step,
+      p2_corner_cal_active: game.players.p2.hw.cornerCal.active,
+      p2_corner_cal_ready: game.players.p2.hw.cornerCal.ready,
+      p2_corner_cal_step: game.players.p2.hw.cornerCal.step,
+      dropout_grace_ms: CONFIG.HARDWARE.dropoutGraceMs,
+      dropout_hold_ms: CONFIG.HARDWARE.dropoutHoldMs
+    },
+    expected_tag_ids: { p1: game.players.p1.tagId, p2: game.players.p2.tagId },
+    websocket_connected: game.ws.connected,
+    demo_enabled: game.demo.enabled,
+    websocket_packet_count: game.ws.packetCount,
+    minigame: mg ? mg.name : null,
+    boss_mix_active: isBossMixActive(),
+    players: activePlayers
+  };
+  if (game.ws.lastTag) {
+    payload.last_tag = {
+      id: game.ws.lastTag.id,
+      x: Number(game.ws.lastTag.x.toFixed(3)),
+      y: Number(game.ws.lastTag.y.toFixed(3))
+    };
+  }
+  return JSON.stringify(payload);
+}
+
+function exposeAutomationHooks() {
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms = 16) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  window.__tag_games = game;
+}
+
+function updatePlayersTrails() {
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    p.trail.unshift({ x: p.screenX, y: p.screenY });
+    if (p.trail.length > CONFIG.CURSOR.trailLength) {
+      p.trail.length = CONFIG.CURSOR.trailLength;
+    }
+  }
+}
+
+function activePlayersForMode() {
+  const list = [];
+  if (game.players.p1.active) list.push(game.players.p1);
+  if (game.twoPlayerMode && game.players.p2.active) list.push(game.players.p2);
+  return list;
+}
+
+function isUwbControlActive() {
+  const p = game.players.p1;
+  return !game.demo.enabled && p.active && p.screenX !== null && p.screenY !== null;
+}
+
+function drawCursors() {
+  const players = activePlayersForMode();
+  for (const p of players) {
+    if (p.screenX === null || p.screenY === null) continue;
+    drawCursorTrail(p);
+    drawCursorGlow(p);
+
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], 220);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size);
+
+    fill(255, 180);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size * 0.35);
+
+    if (game.twoPlayerMode) {
+      fill(p.color[0], p.color[1], p.color[2], 220);
+      textAlign(CENTER, BOTTOM);
+      textSize(12);
+      textStyle(600);
+      text(p.label, p.screenX, p.screenY - CONFIG.CURSOR.size * 0.9);
+      textStyle(NORMAL);
+    }
+
+    if (p.hoverActive) {
+      const pulse = CONFIG.CURSOR.size * (1.4 + game.runtime.hoverPulse * 0.6);
+      noFill();
+      stroke(p.color[0], p.color[1], p.color[2], 120);
+      strokeWeight(2);
+      circle(p.screenX, p.screenY, pulse);
+    }
+  }
+}
+
+function drawCursorTrail(player) {
+  const tlen = player.trail.length;
+  for (let i = tlen - 1; i >= 0; i--) {
+    const pt = player.trail[i];
+    const n = i / Math.max(1, tlen - 1);
+    const size = lerp(4, CONFIG.CURSOR.size, 1 - n);
+    const baseAlpha = player.label === "P2" ? 150 : 180;
+    const alpha = lerp(0, baseAlpha, 1 - n);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha * 0.35);
+    circle(pt.x, pt.y, size);
+  }
+}
+
+function drawCursorGlow(player) {
+  const layers = 12;
+  const maxR = CONFIG.CURSOR.size * 1.25;
+  for (let i = layers; i >= 1; i--) {
+    const r = map(i, 1, layers, maxR * 0.55, maxR * 2.5);
+    const alpha = map(i, 1, layers, 30, 1);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(player.screenX, player.screenY, r);
+  }
+}
+
+function getCursorCollisionRadius(player) {
+  let r = CONFIG.CURSOR.size * 0.5;
+  if (game.runtime.botAssist && player && player.label === "P1") {
+    r *= CONFIG.BOT_HITBOX_SCALE;
+  }
+  return r;
+}
+
+function cursorOverlapsCircle(player, x, y, radius) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  return dist(player.screenX, player.screenY, x, y) < radius + getCursorCollisionRadius(player);
+}
+
+function anyPlayerOverlapsCircle(x, y, radius) {
+  let hover = false;
+  for (const p of activePlayersForMode()) {
+    const hit = cursorOverlapsCircle(p, x, y, radius);
+    p.hoverActive = p.hoverActive || hit;
+    hover = hover || hit;
+  }
+  return hover;
+}
+
+function resetHoverFlags() {
+  game.players.p1.hoverActive = false;
+  game.players.p2.hoverActive = false;
+}
+
+function keyPressed() {
+  if (key === " " && game.state === "menu") {
+    startCountdown();
+  } else if (key === " " && game.state === "results") {
+    resetGameState();
+    game.state = "menu";
+  }
+
+  if (key === "d" || key === "D") {
+    game.demo.forced = !game.demo.forced;
+  }
+
+  if (key === "i" || key === "I") {
+    cycleInputMode();
+  }
+
+  if (key === "b" || key === "B") {
+    game.runtime.botAssist = !game.runtime.botAssist;
+  }
+
+  if (key === "r" || key === "R") {
+    resetGameState();
+    game.state = "menu";
+  }
+
+  if (key === "z" || key === "Z") {
+    handleCalibrationAction();
+  }
+
+  if ((key === "2") && game.state === "menu" && game.players.p2.active) {
+    game.twoPlayerMode = !game.twoPlayerMode;
+  }
+
+  if (key === "Escape") {
+    window.location.href = withRuntimeQuery("game_menu.html");
+  }
+}
+
+function startCountdown() {
+  resetRunState();
+  game.state = "countdown";
+  game.ui.countdownStartMs = millis();
+}
+
+function resetRunState() {
+  game.score = 0;
+  game.displayedScore = 0;
+  game.lives = CONFIG.GAMEPLAY.startLives;
+  game.round = 0;
+  game.difficulty = 1;
+  game.currentMinigameIndex = 0;
+  game.minigameOrder = shuffle([...Array(minigames.length).keys()]);
+  game.stats.minigamesSurvived = 0;
+  game.stats.roundsCompleted = 0;
+  game.stats.successStreak = 0;
+  game.stats.bestStreak = 0;
+  game.effects.gameParticles = [];
+  game.effects.floatingScores = [];
+  game.effects.impactRings = [];
+  game.mini = {};
+  game.ui.mapTransitionStartMs = 0;
+  game.ui.mapTransitionStyleIndex = 0;
+  game.ui.mapTransitionStep = 0;
+  game.ui.styleGroupIndex = 0;
+  game.ui.mapTransitionAnchorX = 0.5;
+  game.ui.mapTransitionAnchorY = 0.5;
+  game.ui.backHoverStartMs = 0;
+  game.ui.calibrateHoverLatched = false;
+  game.ui.prevMouseDown = false;
+  game.ui.finalMessage = "";
+  game.runtime.difficultyMod = CONFIG.GAMEPLAY.directorStartMult;
+  game.runtime.currentDifficulty = 1;
+}
+
+function resetGameState() {
+  resetRunState();
+  game.state = "menu";
+}
+
+function drawMenu() {
+  const ui = currentUIVariant();
+  const centerX = width * 0.5;
+  const centerY = height * 0.32;
+  const panelW = min(width * 0.86, 780);
+  const panelH = min(height * 0.62, 390);
+  const titleSize = constrain(min(width * 0.12, height * 0.14), 52, 110) * ui.titleScale;
+  const subtitleY = centerY + titleSize * 0.50;
+  const statusY = subtitleY + 42;
+  const helperY = statusY + 34;
+  const startY = helperY + 60;
+  const controlsY = startY + 30;
+
+  drawNeonFrame();
+  drawGlassPanel(centerX - panelW * 0.5, centerY - 98, panelW, panelH, 36, 14);
+
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textFont(ui.titleFont);
+  textStyle(900);
+  textSize(titleSize);
+  fill(12, 14, 26, 185);
+  text("COSMIC CURSOR", centerX + 4, centerY + 5);
+  fill(240, 245, 255, 245);
+  text("COSMIC CURSOR", centerX, centerY);
+  textFont(ui.bodyFont);
+
+  textStyle(600);
+  textSize(constrain(titleSize * 0.18, 14, 20) * ui.subtitleScale);
+  fill(225, 232, 255, 170);
+  text("Cursor microgames in a drifting starfield", centerX, subtitleY);
+
+  const activeTagCount = Number(game.players.p1.active) + Number(game.players.p2.active);
+  textStyle(700);
+  textSize(constrain(titleSize * 0.22, 16, 22));
+  if (game.runtime.inputMode === "mouse") {
+    fill(...CONFIG.COLORS.cyan, 230);
+    text("Mouse input mode (press I to change)", centerX, statusY);
+  } else if (game.runtime.inputMode === "tag" && !game.players.p1.active) {
+    fill(...CONFIG.COLORS.amber, 230);
+    text("Waiting for tag data...", centerX, statusY);
+  } else if (!game.demo.enabled) {
+    fill(...CONFIG.COLORS.green, 230);
+    text(`${activeTagCount} tag(s) connected`, centerX, statusY);
+  } else {
+    fill(...CONFIG.COLORS.amber, 230);
+    text("Demo mode - use mouse", centerX, statusY);
+  }
+
+  if (game.players.p2.active) {
+    fill(...CONFIG.COLORS.magenta, 220);
+    textSize(constrain(titleSize * 0.15, 12, 16));
+    text("2 PLAYER MODE AVAILABLE (press 2)", centerX, helperY);
+  }
+
+  const pulse = map(sin(millis() * 0.005), -1, 1, 90, 230);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(constrain(titleSize * 0.28, 20, 30));
+  text("Press SPACE to start", centerX, startY);
+
+  textStyle(500);
+  textSize(constrain(titleSize * 0.14, 11, 14));
+  fill(255, 130);
+  text("I input   B bot   D demo   Z calibrate", centerX, controlsY);
+
+  resetHoverFlags();
+  drawMenuStats();
+}
+
+function drawMenuStats() {
+  const ui = currentUIVariant();
+  const lines = [];
+  const p1hw = game.players.p1.hw;
+  const p2hw = game.players.p2.hw;
+  const p1corner = p1hw.cornerCal;
+  const p1status = p1corner.ready ? "ready" : (p1corner.active ? `step ${min(p1corner.step + 1, ROOM_CALIBRATION_STEPS.length)}/4` : "not set");
+  lines.push(`WS: ${game.ws.connected ? "connected" : "offline"}`);
+  lines.push(`Demo forced (D): ${game.demo.forced ? "on" : "off"}`);
+  lines.push(`Two-player: ${game.twoPlayerMode ? "on" : "off"}`);
+  lines.push(`Input mode (I): ${inputModeLabel(game.runtime.inputMode)}`);
+  lines.push(`Bot assist (B): ${game.runtime.botAssist ? "on" : "off"}`);
+  lines.push(`Corner cal P1: ${p1status}`);
+  lines.push(`Tag spread P1: ${p1hw.calReady ? "ready" : "learning"} (${p1hw.sampleCount}/${CONFIG.HARDWARE.calMinSamples})`);
+  lines.push(`Tag spread P2: ${p2hw.calReady ? "ready" : "learning"} (${p2hw.sampleCount}/${CONFIG.HARDWARE.calMinSamples})`);
+  lines.push(`Tag IDs: P1=${game.players.p1.tagId}, P2=${game.players.p2.tagId}`);
+  textAlign(LEFT, TOP);
+  textStyle(400);
+  textSize(11);
+  const panelW = min(width * 0.52, 500);
+  const lineH = 16;
+  const extra = 2;
+  const totalLines = lines.length + 1;
+  const panelH = totalLines * lineH + 18 + extra;
+  const px = 20;
+  const py = height - panelH - 14;
+  drawGlassPanel(px, py, panelW, panelH, 14, 16);
+  fill(255, 135);
+  let y = py + 10;
+  for (const ln of lines) {
+    text(ln, px + 10, y);
+    y += lineH;
+  }
+  if (game.ws.lastTag) {
+    const age = ((millis() - game.ws.lastTag.ms) / 1000).toFixed(1);
+    const x = game.ws.lastTag.x.toFixed(2);
+    const y = game.ws.lastTag.y.toFixed(2);
+    text(`Last tag: id=${game.ws.lastTag.id} x=${x} y=${y} (${age}s ago)`, px + 10, py + panelH - 22);
+  } else {
+    text("Last tag: none yet", px + 10, py + panelH - 22);
+  }
+}
+
+function drawCountdown() {
+  const elapsed = millis() - game.ui.countdownStartMs;
+  const remain = max(0, 3 - floor(elapsed / 1000));
+
+  if (elapsed >= 3000) {
+    startMinigameAtIndex(0);
+    game.state = "playing";
+    return;
+  }
+
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(130);
+  fill(255, 230);
+  text(remain, width / 2, height / 2);
+
+  textStyle(400);
+  textSize(22);
+  fill(255, 180);
+  text("Get ready", width / 2, height / 2 + 90);
+
+  resetHoverFlags();
+}
+
+function currentMinigame() {
+  const idx = game.minigameOrder[game.currentMinigameIndex];
+  return minigames[idx] || null;
+}
+
+function updateAndDrawPlayingState() {
+  resetHoverFlags();
+
+  const mg = currentMinigame();
+  if (!mg) {
+    game.state = "results";
+    game.ui.resultStartMs = millis();
+    return;
+  }
+
+  drawMinigameBackgroundTint(mg.color);
+
+  const effectiveDifficulty = game.runtime.currentDifficulty || getEffectiveDifficulty();
+  const uwbDurationAssist = isUwbControlActive() ? CONFIG.HARDWARE.uwbDurationAssist : 1;
+  const adjustedDuration = mg.duration ? (mg.duration * uwbDurationAssist) / sqrt(effectiveDifficulty) : null;
+  if (adjustedDuration && millis() - game.minigameStartMs >= adjustedDuration) {
+    const timeout = getMinigameTimeoutResult(mg, effectiveDifficulty);
+    endMinigame(timeout.success, timeout.points);
+    return;
+  }
+
+  const bossMixResult = updateBossMixOverlay(activePlayersForMode(), effectiveDifficulty);
+  if (bossMixResult && bossMixResult.fail) {
+    triggerFlash(CONFIG.COLORS.red, 280, 115);
+    triggerShake(8, 260);
+    spawnImpactRing(bossMixResult.x, bossMixResult.y, CONFIG.COLORS.red, 14, 220, 280, 3.6);
+    endMinigame(false, 0);
+    return;
+  }
+
+  const result = mg.update(activePlayersForMode(), effectiveDifficulty);
+  if (result && result.done) {
+    endMinigame(result.success, result.points || 0);
+    return;
+  }
+
+  mg.draw();
+  drawBossMixOverlay();
+  drawHUD(mg, adjustedDuration, effectiveDifficulty);
+}
+
+function getMinigameTimeoutResult(mg, difficulty) {
+  if (typeof mg.onTimeout === "function") {
+    const out = mg.onTimeout(difficulty) || {};
+    return {
+      success: out.success !== false,
+      points: Number(out.points || 0)
+    };
+  }
+  return {
+    success: true,
+    points: mg.getPoints ? Number(mg.getPoints() || 0) : 0
+  };
+}
+
+function endMinigame(success, points) {
+  const mg = currentMinigame();
+  let callout = "";
+  game.ui.lastResult = {
+    success,
+    points,
+    name: mg ? mg.name : "ROUND",
+    callout: ""
+  };
+
+  if (success) {
+    game.score += points;
+    game.stats.minigamesSurvived++;
+    game.stats.successStreak++;
+    game.stats.bestStreak = max(game.stats.bestStreak, game.stats.successStreak);
+    callout = random(ROUND_SUCCESS_CALLOUTS);
+    if (game.stats.successStreak >= 3) {
+      callout = `Streak x${game.stats.successStreak}`;
+      addFloatingScore(width * 0.5, height * 0.3, callout, CONFIG.COLORS.cyan);
+    }
+    triggerFlash(CONFIG.COLORS.green, 260, 90);
+    spawnImpactRing(width * 0.5, height * 0.5, CONFIG.COLORS.green, 30, min(width, height) * 0.42, 320, 3.6);
+    if (points > 0) {
+      addFloatingScore(width * 0.5, height * 0.43, `+${points}`, CONFIG.COLORS.green);
+    }
+  } else {
+    game.stats.successStreak = 0;
+    callout = random(ROUND_FAIL_CALLOUTS);
+    game.lives--;
+    triggerFlash(CONFIG.COLORS.red, 320, 120);
+    triggerShake(9, 300);
+    spawnImpactRing(width * 0.5, height * 0.5, CONFIG.COLORS.red, 24, min(width, height) * 0.5, 390, 4.4);
+  }
+  game.ui.lastResult.callout = callout;
+  adjustDifficultyDirector(success);
+
+  if (game.lives <= 0) {
+    game.ui.finalMessage = random(DEATH_MESSAGES);
+    game.state = "results";
+    game.ui.resultStartMs = millis();
+  } else {
+    game.state = "round_result";
+    game.ui.roundResultStartMs = millis();
+  }
+}
+
+function drawRoundResult() {
+  const ui = currentUIVariant();
+  const ms = millis() - game.ui.roundResultStartMs;
+  const mg = nextMinigamePreview();
+
+  if (ms >= 1500) {
+    advanceToNextMinigame();
+    game.state = "playing";
+    return;
+  }
+
+  if (mg) {
+    fill(mg.color[0], mg.color[1], mg.color[2], 8);
+    rect(0, 0, width, height);
+
+    if (game.ui.lastResult) {
+      const lr = game.ui.lastResult;
+      const col = lr.success ? CONFIG.COLORS.green : CONFIG.COLORS.red;
+      textAlign(CENTER, CENTER);
+      textFont(ui.titleFont);
+      textSize(50);
+      fill(col[0], col[1], col[2], 215);
+      text(lr.success ? "SAFE!" : "SPLAT!", width / 2, height * 0.30);
+      textFont(ui.bodyFont);
+      textSize(15);
+      fill(255, 170);
+      text(`${lr.name} ${lr.success ? "cleared" : "failed"}`, width / 2, height * 0.35);
+      if (lr.callout) {
+        textStyle(700);
+        textSize(22);
+        fill(col[0], col[1], col[2], 220);
+        text(lr.callout, width / 2, height * 0.395);
+      }
+    }
+
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(40);
+    fill(mg.color[0], mg.color[1], mg.color[2], 220);
+    text(mg.name, width / 2, height * 0.44);
+
+    textStyle(500);
+    textSize(17);
+    fill(255, 180);
+    text(mg.description, width / 2, height * 0.52);
+  }
+
+  drawRoundMiniHud();
+}
+
+function drawRoundMiniHud() {
+  textAlign(CENTER, TOP);
+  textSize(16);
+  textStyle(400);
+  fill(255, 140);
+  text(`Round ${game.round + 1}`, width / 2, 22);
+}
+
+function drawResults() {
+  const ui = currentUIVariant();
+  const t = constrain((millis() - game.ui.resultStartMs) / 1500, 0, 1);
+  const eased = 1 - pow(1 - t, 3);
+  const shown = floor(game.score * eased);
+
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textFont(ui.titleFont);
+  textSize(48);
+  fill(255, 225);
+  text("RUN COMPLETE", width / 2, height * 0.23);
+  textFont(ui.bodyFont);
+
+  textStyle(500);
+  textSize(17);
+  fill(255, 180);
+  text(game.ui.finalMessage || "The run exploded in style.", width / 2, height * 0.29);
+
+  textSize(72);
+  fill(...CONFIG.COLORS.cyan, 240);
+  text(shown, width / 2, height * 0.41);
+
+  textStyle(400);
+  textSize(20);
+  fill(255, 180);
+  text(`Minigames survived: ${game.stats.minigamesSurvived}`, width / 2, height * 0.52);
+  text(`Rounds completed: ${game.stats.roundsCompleted}`, width / 2, height * 0.57);
+  text(`Best streak: ${game.stats.bestStreak}`, width / 2, height * 0.62);
+
+  drawLivesRow(width / 2 - (CONFIG.GAMEPLAY.maxLives - 1) * 8, height * 0.69, 10);
+
+  const pulse = map(sin(millis() * 0.005), -1, 1, 90, 230);
+  textStyle(700);
+  textSize(26);
+  fill(255, pulse);
+  text("Press SPACE to play again", width / 2, height * 0.8);
+}
+
+function drawHUD(mg, adjustedDuration, effectiveDifficulty = game.difficulty) {
+  const ui = currentUIVariant();
+  game.displayedScore = lerp(game.displayedScore, game.score, 0.12);
+  const leftW = min(420, width * 0.44);
+  const scoreW = 220;
+  const livesW = 166;
+  const gap = 12;
+  const clusterW = leftW + scoreW + livesW + gap * 2;
+  const baseX = width * 0.5 - clusterW * 0.5;
+  const y = 10;
+  const leftX = baseX;
+  const scoreX = leftX + leftW + gap;
+  const livesX = scoreX + scoreW + gap;
+  drawGlassPanel(leftX, y, leftW, 52, 18, 18);
+  drawGlassPanel(scoreX, 8, scoreW, 52, 20, 18);
+  drawGlassPanel(livesX, y, livesW, 40, 18, 14);
+
+  textStyle(700);
+  textSize(ui.hudTitleSize);
+  textAlign(LEFT, TOP);
+  fill(mg.color[0], mg.color[1], mg.color[2], 230);
+  textFont(ui.bodyFont);
+  text(clipTextToWidth(mg.name, leftW - 28), leftX + 10, 16);
+
+  if (typeof mg.getStatusText === "function") {
+    const status = mg.getStatusText();
+    if (status) {
+      textStyle(500);
+      textSize(ui.hudStatusSize);
+      fill(255, 180);
+      text(clipTextToWidth(status, leftW - 28), leftX + 10, 36);
+    }
+  }
+
+  textFont(ui.monoFont);
+  textAlign(CENTER, TOP);
+  textSize(32);
+  fill(255, 240);
+  text(floor(game.displayedScore), scoreX + scoreW * 0.5, 14);
+  textFont(ui.bodyFont);
+
+  drawLivesRow(livesX + 40, 28, 10);
+
+  if (adjustedDuration) {
+    const pct = constrain((millis() - game.minigameStartMs) / adjustedDuration, 0, 1);
+    drawTimerBar(1 - pct, mg.color);
+  }
+
+  textAlign(CENTER, BOTTOM);
+  textSize(12);
+  textStyle(400);
+  fill(255, 100);
+  text(`Round ${game.round + 1}  Diff ${effectiveDifficulty.toFixed(2)}`, width * 0.5, height - 12);
+
+  if (isBossMixActive()) {
+    const w = 124;
+    const h = 24;
+    const bossX = width * 0.5 - w * 0.5;
+    noStroke();
+    fill(CONFIG.COLORS.red[0], CONFIG.COLORS.red[1], CONFIG.COLORS.red[2], 180);
+    rect(bossX, 56, w, h, 7);
+    fill(255, 235);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(12);
+    text("BOSS MIX ACTIVE", width * 0.5, 68);
+  }
+}
+
+function clipTextToWidth(value, maxWidth) {
+  const src = String(value || "");
+  if (!src) return "";
+  if (textWidth(src) <= maxWidth) return src;
+  let out = src;
+  while (out.length > 1 && textWidth(out + "...") > maxWidth) {
+    out = out.slice(0, -1);
+  }
+  return out + "...";
+}
+
+function drawTimerBar(remaining, themeColor) {
+  const y = height - 6;
+  noStroke();
+  fill(255, 25);
+  rect(0, y, width, 6);
+
+  let c = themeColor;
+  if (remaining < 0.25) c = CONFIG.COLORS.red;
+  else if (remaining < 0.5) c = CONFIG.COLORS.amber;
+
+  fill(c[0], c[1], c[2], 220);
+  rect(0, y, width * remaining, 6);
+}
+
+function drawGlassPanel(x, y, w, h, r = 12, alpha = 22) {
+  noStroke();
+  fill(214, 230, 255, alpha);
+  rect(x, y, w, h, r);
+  stroke(225, 238, 255, 42);
+  strokeWeight(1);
+  noFill();
+  rect(x, y, w, h, r);
+}
+
+function drawNeonFrame() {
+  noFill();
+  strokeWeight(2);
+  stroke(156, 232, 255, 52);
+  rect(16, 16, width - 32, height - 32, 18);
+  stroke(246, 186, 255, 40);
+  rect(28, 28, width - 56, height - 56, 18);
+}
+
+function drawLivesRow(startX, y, size) {
+  noStroke();
+  for (let i = 0; i < CONFIG.GAMEPLAY.maxLives; i++) {
+    const cx = startX + i * (size + 6);
+    if (i < game.lives) {
+      fill(...CONFIG.COLORS.green, 230);
+      circle(cx, y, size);
+    } else {
+      const drew = drawSpriteCentered("skull", cx, y, size * 1.65, 170);
+      if (!drew) {
+        fill(70, 70, 85, 170);
+        circle(cx, y, size);
+      }
+    }
+  }
+}
+
+function drawMinigameBackgroundTint(color) {
+  fill(color[0], color[1], color[2], 7);
+  noStroke();
+  rect(0, 0, width, height);
+}
+
+function nextMinigamePreview() {
+  const idx = game.currentMinigameIndex + 1;
+  if (idx < game.minigameOrder.length) return minigames[game.minigameOrder[idx]];
+  return minigames[game.minigameOrder[0]];
+}
+
+function getEffectiveDifficulty() {
+  const minMult = CONFIG.GAMEPLAY.directorMinMult;
+  const maxMult = CONFIG.GAMEPLAY.directorMaxMult;
+  const mult = constrain(game.runtime.difficultyMod, minMult, maxMult);
+  const uwbAssist = isUwbControlActive() ? 0.82 : 1;
+  return max(0.9, game.difficulty * mult * uwbAssist);
+}
+
+function adjustDifficultyDirector(success) {
+  if (success) {
+    const streakBonus = min(0.03, game.stats.successStreak * 0.0045);
+    game.runtime.difficultyMod += CONFIG.GAMEPLAY.directorWinStep + streakBonus;
+  } else {
+    const roundPenalty = min(0.035, game.round * 0.006);
+    game.runtime.difficultyMod -= CONFIG.GAMEPLAY.directorFailStep + roundPenalty;
+  }
+  game.runtime.difficultyMod = constrain(
+    game.runtime.difficultyMod,
+    CONFIG.GAMEPLAY.directorMinMult,
+    CONFIG.GAMEPLAY.directorMaxMult
+  );
+}
+
+function shouldEnableBossMix(roundNumber, minigameIndex) {
+  if (roundNumber < CONFIG.GAMEPLAY.bossMixUnlockRound) return false;
+  const cadence = max(2, floor(CONFIG.GAMEPLAY.bossMixCadence));
+  const key = roundNumber * 11 + minigameIndex * 7;
+  return key % cadence === 0;
+}
+
+function setupBossMixForCurrentMinigame(difficulty) {
+  const active = shouldEnableBossMix(game.round + 1, game.currentMinigameIndex);
+  game.mini.bossMix = {
+    active,
+    hazards: [],
+    pattern: random(["meteor", "cross", "orbit"]),
+    spawnInterval: max(290, 880 / pow(max(1, difficulty), 0.76)),
+    spawnMs: millis() + random(180, 420),
+    maxHazards: max(4, floor(4 + difficulty * 0.9)),
+    warningMs: millis() + 760
+  };
+  if (!active) return;
+  triggerFlash(CONFIG.COLORS.red, 190, 58);
+  addFloatingScore(width * 0.5, height * 0.2, "BOSS MIX", CONFIG.COLORS.red);
+}
+
+function isBossMixActive() {
+  return Boolean(game.mini?.bossMix?.active);
+}
+
+function spawnBossMixHazard(mix, difficulty) {
+  const edge = floor(random(4));
+  let x = width * 0.5;
+  let y = height * 0.5;
+  const margin = 48;
+  if (edge === 0) {
+    x = random(20, width - 20);
+    y = -margin;
+  } else if (edge === 1) {
+    x = width + margin;
+    y = random(20, height - 20);
+  } else if (edge === 2) {
+    x = random(20, width - 20);
+    y = height + margin;
+  } else {
+    x = -margin;
+    y = random(20, height - 20);
+  }
+
+  const tx = width * random(0.22, 0.78);
+  const ty = height * random(0.24, 0.82);
+  const dx = tx - x;
+  const dy = ty - y;
+  const len = Math.hypot(dx, dy) || 1;
+  const speed = random(2.4, 5.1) * pow(max(1, difficulty), 0.4);
+  const vx = (dx / len) * speed;
+  const vy = (dy / len) * speed;
+  return {
+    x,
+    y,
+    vx,
+    vy,
+    radius: random(16, 28),
+    bornMs: millis(),
+    spin: random(-0.08, 0.08),
+    theta: random(TWO_PI),
+    pattern: mix.pattern
+  };
+}
+
+function updateBossMixOverlay(players, difficulty) {
+  const mix = game.mini?.bossMix;
+  if (!mix || !mix.active) return null;
+  const now = millis();
+
+  while (now >= mix.spawnMs) {
+    mix.spawnMs += mix.spawnInterval;
+    mix.hazards.push(spawnBossMixHazard(mix, difficulty));
+    if (mix.hazards.length > mix.maxHazards) {
+      mix.hazards.splice(0, mix.hazards.length - mix.maxHazards);
+    }
+  }
+
+  for (let i = mix.hazards.length - 1; i >= 0; i--) {
+    const h = mix.hazards[i];
+    h.theta += h.spin;
+    if (h.pattern === "orbit") {
+      h.vx += cos(h.theta) * 0.05;
+      h.vy += sin(h.theta) * 0.05;
+    } else if (h.pattern === "cross") {
+      h.vx += sin(h.theta * 1.2) * 0.03;
+      h.vy += cos(h.theta * 1.2) * 0.03;
+    }
+    const v = Math.hypot(h.vx, h.vy);
+    const maxV = 6.6 + difficulty * 0.35;
+    if (v > maxV) {
+      h.vx = (h.vx / v) * maxV;
+      h.vy = (h.vy / v) * maxV;
+    }
+    h.x += h.vx;
+    h.y += h.vy;
+
+    if (h.x < -90 || h.x > width + 90 || h.y < -90 || h.y > height + 90) {
+      mix.hazards.splice(i, 1);
+      continue;
+    }
+
+    for (const p of players) {
+      if (!p.active || p.screenX === null || p.screenY === null) continue;
+      const rr = getCursorCollisionRadius(p) + h.radius * 0.8;
+      if (dist(p.screenX, p.screenY, h.x, h.y) <= rr) {
+        p.hoverActive = true;
+        return { fail: true, x: h.x, y: h.y };
+      }
+    }
+  }
+  return null;
+}
+
+function drawBossMixOverlay() {
+  const mix = game.mini?.bossMix;
+  if (!mix || !mix.active) return;
+
+  for (const h of mix.hazards) {
+    const pulse = 1 + sin((millis() - h.bornMs) * 0.012) * 0.15;
+    drawTargetGlow(h.x, h.y, h.radius * 0.9 * pulse, CONFIG.COLORS.red, 145);
+
+    push();
+    translate(h.x, h.y);
+    rotate(h.theta);
+    noStroke();
+    fill(CONFIG.COLORS.red[0], CONFIG.COLORS.red[1], CONFIG.COLORS.red[2], 228);
+    circle(0, 0, h.radius * 1.7);
+    stroke(255, 188);
+    strokeWeight(2);
+    line(-h.radius * 0.55, -h.radius * 0.55, h.radius * 0.55, h.radius * 0.55);
+    line(h.radius * 0.55, -h.radius * 0.55, -h.radius * 0.55, h.radius * 0.55);
+    pop();
+  }
+
+  if (millis() < mix.warningMs) {
+    textAlign(CENTER, CENTER);
+    textStyle(900);
+    textSize(24);
+    fill(CONFIG.COLORS.red[0], CONFIG.COLORS.red[1], CONFIG.COLORS.red[2], 220);
+    text("BOSS MIX", width * 0.5, 98);
+  }
+}
+
+function selectNextTransitionStyle() {
+  let seq = TRANSITION_STYLE_SEQUENCE_RARE;
+  const g = currentStyleGroup();
+  if (g && Array.isArray(g.transitionSequence) && g.transitionSequence.length) {
+    seq = g.transitionSequence;
+  }
+  if (!seq.length) {
+    seq = TRANSITION_STYLE_SEQUENCE_CLEAN;
+  }
+  const seqIndex = game.ui.mapTransitionStep % seq.length;
+  let nextStyle = seq[seqIndex];
+  game.ui.mapTransitionStep++;
+  if (nextStyle === game.ui.mapTransitionStyleIndex) {
+    nextStyle = seq[game.ui.mapTransitionStep % seq.length];
+    game.ui.mapTransitionStep++;
+  }
+  return nextStyle;
+}
+
+function advanceToNextMinigame() {
+  game.currentMinigameIndex++;
+  if (game.currentMinigameIndex >= game.minigameOrder.length) {
+    game.currentMinigameIndex = 0;
+    game.round++;
+    game.stats.roundsCompleted++;
+    game.difficulty = 1 + game.round * CONFIG.GAMEPLAY.difficultyPerRound;
+    game.runtime.difficultyMod = min(CONFIG.GAMEPLAY.directorMaxMult, game.runtime.difficultyMod + 0.02);
+    game.minigameOrder = shuffle([...Array(minigames.length).keys()]);
+    if (game.lives < CONFIG.GAMEPLAY.maxLives) game.lives++;
+  }
+  game.ui.mapTransitionStyleIndex = selectNextTransitionStyle();
+  game.ui.mapTransitionAnchorX = random(0.35, 0.65);
+  game.ui.mapTransitionAnchorY = random(0.34, 0.66);
+  game.ui.mapTransitionStartMs = millis();
+  startMinigameAtIndex(game.currentMinigameIndex);
+}
+
+function startMinigameAtIndex(index) {
+  game.currentMinigameIndex = index;
+  game.minigameStartMs = millis();
+  game.runtime.currentDifficulty = getEffectiveDifficulty();
+  const mg = currentMinigame();
+  if (mg) {
+    mg.setup(game.runtime.currentDifficulty);
+    setupBossMixForCurrentMinigame(game.runtime.currentDifficulty);
+  }
+}
+
+function drawConnectionIndicator() {
+  noStroke();
+  let col = game.ws.connected ? CONFIG.COLORS.green : CONFIG.COLORS.red;
+  if (game.runtime.inputMode === "mouse") {
+    col = CONFIG.COLORS.amber;
+  }
+  const cx = constrain(width * 0.5 - 210, 18, width - 18);
+  fill(col[0], col[1], col[2], 240);
+  circle(cx, 18, 10);
+}
+
+function drawDemoBadge() {
+  const mode = game.runtime.inputMode;
+  let label = "";
+  let color = CONFIG.COLORS.amber;
+
+  if (game.runtime.botAssist && game.demo.enabled) {
+    label = "BOT";
+    color = CONFIG.COLORS.lime;
+  } else if (mode === "mouse") {
+    label = "MOUSE";
+    color = CONFIG.COLORS.cyan;
+  } else if (mode === "tag" && !game.players.p1.active) {
+    label = "WAIT TAG";
+    color = CONFIG.COLORS.red;
+  } else if (game.demo.enabled) {
+    label = "DEMO";
+    color = CONFIG.COLORS.amber;
+  }
+
+  if (!label) return;
+
+  const w = label.length >= 7 ? 98 : 70;
+  const h = 28;
+  const x = constrain(width * 0.5 + 120, 8, width - w - 8);
+  noStroke();
+  fill(color[0], color[1], color[2], 220);
+  rect(x, 14, w, h, 8);
+  fill(15, 15, 20, 240);
+  textAlign(CENTER, CENTER);
+  textSize(14);
+  textStyle(700);
+  text(label, x + w * 0.5, 28);
+}
+
+function drawBackToMenuButton() {
+  const controls = hudControlButtons();
+  const rectObj = controls.menu;
+  const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+  const playerHover = activePlayersForMode().some((p) => cursorOverlapsRect(p, rectObj));
+  const hover = mouseHover || playerHover;
+  const holdMs = CONFIG.HARDWARE.uiHoldMs;
+
+  if (hover) {
+    if (!game.ui.backHoverStartMs) game.ui.backHoverStartMs = millis();
+    if (mouseIsPressed || millis() - game.ui.backHoverStartMs > holdMs) {
+      window.location.href = withRuntimeQuery("game_menu.html");
+      return;
+    }
+  } else {
+    game.ui.backHoverStartMs = 0;
+  }
+
+  noStroke();
+  fill(10, 10, 15, 150);
+  rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 6);
+  fill(255, hover ? 255 : 130);
+  textAlign(CENTER, CENTER);
+  textStyle(600);
+  textSize(13);
+  text("MENU", rectObj.x + rectObj.w * 0.5, rectObj.y + rectObj.h * 0.5);
+  if (hover) {
+    stroke(255, 220);
+    line(rectObj.x + 22, rectObj.y + 22, rectObj.x + rectObj.w - 22, rectObj.y + 22);
+  }
+}
+
+function resetPlayerCalibration(player) {
+  player.hw.sampleCount = 0;
+  player.hw.minX = Infinity;
+  player.hw.maxX = -Infinity;
+  player.hw.minY = Infinity;
+  player.hw.maxY = -Infinity;
+  player.hw.calReady = false;
+}
+
+function beginCornerCalibration(player = game.players.p1) {
+  const cal = player.hw.cornerCal;
+  cal.active = true;
+  cal.ready = false;
+  cal.step = 0;
+  cal.points = { bl: null, br: null, tl: null, tr: null };
+  cal.bounds = null;
+  cal.lastCaptureMs = millis();
+  player.hw.smoothX = null;
+  player.hw.smoothY = null;
+  player.velocity.x = 0;
+  player.velocity.y = 0;
+  resetPlayerCalibration(player);
+  triggerFlash(CONFIG.COLORS.amber, 180, 76);
+}
+
+function averageRecentRawSample(player) {
+  const samples = player.hw.rawSamples || [];
+  if (!samples.length) return null;
+  const now = millis();
+  const maxAge = CONFIG.HARDWARE.cornerCaptureWindowMs;
+  const recent = samples.filter((s) => now - s.ms <= maxAge);
+  const pick = recent.length ? recent : samples;
+  if (!pick.length) return null;
+  let sx = 0;
+  let sy = 0;
+  for (const s of pick) {
+    sx += s.x;
+    sy += s.y;
+  }
+  return { x: sx / pick.length, y: sy / pick.length };
+}
+
+function finalizeCornerCalibration(player = game.players.p1) {
+  const cal = player.hw.cornerCal;
+  const { bl, br, tl, tr } = cal.points;
+  if (!bl || !br || !tl || !tr) return false;
+
+  const left = (bl.x + tl.x) * 0.5;
+  const right = (br.x + tr.x) * 0.5;
+  const bottom = (bl.y + br.y) * 0.5;
+  const top = (tl.y + tr.y) * 0.5;
+
+  let xMin = min(left, right);
+  let xMax = max(left, right);
+  let yMin = min(bottom, top);
+  let yMax = max(bottom, top);
+
+  const spanX = xMax - xMin;
+  const spanY = yMax - yMin;
+  if (spanX < CONFIG.HARDWARE.minCalSpanX || spanY < CONFIG.HARDWARE.minCalSpanY) {
+    triggerFlash(CONFIG.COLORS.red, 210, 95);
+    return false;
+  }
+
+  const mx = max(0.01, spanX * CONFIG.HARDWARE.cornerBoundsMarginRatio);
+  const my = max(0.01, spanY * CONFIG.HARDWARE.cornerBoundsMarginRatio);
+  xMin -= mx;
+  xMax += mx;
+  yMin -= my;
+  yMax += my;
+
+  cal.bounds = { xMin, xMax, yMin, yMax };
+  writeSharedCalibrationBounds(player.tagId, cal.bounds);
+  cal.ready = true;
+  cal.active = false;
+  cal.step = ROOM_CALIBRATION_STEPS.length;
+  cal.lastCaptureMs = millis();
+  player.hw.smoothX = null;
+  player.hw.smoothY = null;
+  resetPlayerCalibration(player);
+  triggerFlash(CONFIG.COLORS.green, 220, 90);
+  return true;
+}
+
+function captureCornerStep(player = game.players.p1) {
+  const cal = player.hw.cornerCal;
+  if (!cal.active) return false;
+  const stepInfo = ROOM_CALIBRATION_STEPS[cal.step];
+  if (!stepInfo) return finalizeCornerCalibration(player);
+
+  const avg = averageRecentRawSample(player);
+  if (!avg) {
+    triggerFlash(CONFIG.COLORS.red, 180, 80);
+    return false;
+  }
+  cal.points[stepInfo.key] = avg;
+  cal.lastCaptureMs = millis();
+  cal.step++;
+
+  if (player.screenX !== null && player.screenY !== null) {
+    emitParticles(player.screenX, player.screenY, CONFIG.COLORS.cyan, 10, 4.5);
+  }
+  if (cal.step >= ROOM_CALIBRATION_STEPS.length) {
+    return finalizeCornerCalibration(player);
+  }
+  triggerFlash(CONFIG.COLORS.cyan, 150, 70);
+  return true;
+}
+
+function handleCalibrationAction() {
+  const p = game.players.p1;
+  if (!Number.isFinite(p.rawX) || !Number.isFinite(p.rawY)) return;
+  const cal = p.hw.cornerCal;
+  if (!cal.active) {
+    beginCornerCalibration(p);
+    return;
+  }
+  captureCornerStep(p);
+}
+
+function calibrationButtonLabel() {
+  const cal = game.players.p1.hw.cornerCal;
+  if (cal.active) {
+    const step = ROOM_CALIBRATION_STEPS[cal.step];
+    return step ? `CAP ${step.short}` : "FINISH";
+  }
+  if (cal.ready) return "RECALIBRATE";
+  return "CALIBRATE";
+}
+
+function drawCalibrationButton() {
+  const controls = hudControlButtons();
+  const rectObj = controls.calibrate;
+  const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+  const playerHover = activePlayersForMode().some((p) => cursorOverlapsRect(p, rectObj));
+  const hover = mouseHover || playerHover;
+  const cal = game.players.p1.hw.cornerCal;
+  const active = cal.active;
+  const mouseClicked = mouseHover && mouseIsPressed && !game.ui.prevMouseDown;
+  if (mouseClicked) {
+    handleCalibrationAction();
+  }
+  if (playerHover && !game.ui.calibrateHoverLatched) {
+    game.ui.calibrateHoverLatched = true;
+    handleCalibrationAction();
+  } else if (!playerHover) {
+    game.ui.calibrateHoverLatched = false;
+  }
+
+  noStroke();
+  if (active) {
+    fill(CONFIG.COLORS.cyan[0], CONFIG.COLORS.cyan[1], CONFIG.COLORS.cyan[2], hover ? 235 : 210);
+  } else if (cal.ready) {
+    fill(CONFIG.COLORS.green[0], CONFIG.COLORS.green[1], CONFIG.COLORS.green[2], hover ? 220 : 192);
+  } else {
+    fill(10, 10, 15, hover ? 190 : 150);
+  }
+  rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 6);
+
+  if (active || cal.ready) {
+    fill(12, 22, 36, 235);
+  } else {
+    fill(255, 255, 255, 130);
+  }
+  textAlign(CENTER, CENTER);
+  textStyle(700);
+  textSize(13);
+  text(calibrationButtonLabel(), rectObj.x + rectObj.w * 0.5, rectObj.y + rectObj.h * 0.5);
+}
+
+function drawCalibrationGuide() {
+  const p = game.players.p1;
+  const cal = p.hw.cornerCal;
+  const mode = game.runtime.inputMode;
+  if (mode !== "tag" && !cal.active && !isUwbControlActive()) return;
+
+  let line = "";
+  let sub = "";
+  let color = CONFIG.COLORS.amber;
+
+  if (cal.active) {
+    const step = ROOM_CALIBRATION_STEPS[cal.step];
+    const idx = min(cal.step + 1, ROOM_CALIBRATION_STEPS.length);
+    line = step ? `CALIBRATION ${idx}/4: STAND AT ${step.label}` : "FINALIZING CALIBRATION";
+    sub = "Press CALIBRATE once (or press Z) to capture this corner";
+    color = CONFIG.COLORS.cyan;
+  } else if (cal.ready && cal.bounds) {
+    line = "CALIBRATION READY";
+    sub = `x ${cal.bounds.xMin.toFixed(2)}..${cal.bounds.xMax.toFixed(2)}   z ${cal.bounds.yMin.toFixed(2)}..${cal.bounds.yMax.toFixed(2)}`;
+    color = CONFIG.COLORS.green;
+  } else {
+    line = "RUN CALIBRATION";
+    sub = "Capture corners in order: BL -> BR -> TL -> TR";
+    color = CONFIG.COLORS.amber;
+  }
+
+  const w = min(620, width * 0.72);
+  const h = 54;
+  const x = width * 0.5 - w * 0.5;
+  const y = 108;
+  drawGlassPanel(x, y, w, h, 10, 18);
+  fill(color[0], color[1], color[2], 225);
+  textAlign(CENTER, TOP);
+  textStyle(700);
+  textSize(14);
+  text(line, width * 0.5, y + 8);
+  fill(255, 170);
+  textStyle(500);
+  textSize(12);
+  text(sub, width * 0.5, y + 30);
+}
+
+function hudControlButtons() {
+  const y = 72;
+  const h = 30;
+  const w = 128;
+  const gap = 12;
+  const total = w * 2 + gap;
+  const startX = width * 0.5 - total * 0.5;
+  return {
+    menu: { x: startX, y, w, h },
+    calibrate: { x: startX + w + gap, y, w, h }
+  };
+}
+
+function pointInRect(x, y, rectObj) {
+  return x >= rectObj.x && x <= rectObj.x + rectObj.w && y >= rectObj.y && y <= rectObj.y + rectObj.h;
+}
+
+function cursorOverlapsRect(player, rectObj) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  const nx = constrain(player.screenX, rectObj.x, rectObj.x + rectObj.w);
+  const ny = constrain(player.screenY, rectObj.y, rectObj.y + rectObj.h);
+  return dist(player.screenX, player.screenY, nx, ny) <= getCursorCollisionRadius(player);
+}
+
+function inputModeLabel(mode) {
+  if (mode === "mouse") return "MOUSE";
+  if (mode === "tag") return "TAG ONLY";
+  return "AUTO";
+}
+
+function moveToward(x, y, tx, ty, stepMax) {
+  const dx = tx - x;
+  const dy = ty - y;
+  const d = Math.hypot(dx, dy);
+  if (d < 0.001) return { x, y };
+  const step = Math.min(stepMax, d);
+  const k = step / d;
+  return { x: x + dx * k, y: y + dy * k };
+}
+
+function segmentPointDistance(ax, ay, bx, by, px, py) {
+  const vx = bx - ax;
+  const vy = by - ay;
+  const wx = px - ax;
+  const wy = py - ay;
+  const len2 = vx * vx + vy * vy;
+  if (len2 < 1e-6) return dist(ax, ay, px, py);
+  const t = constrain((wx * vx + wy * vy) / len2, 0, 1);
+  const cx = ax + vx * t;
+  const cy = ay + vy * t;
+  return dist(cx, cy, px, py);
+}
+
+function getBotAssistTarget(currentX, currentY) {
+  if (game.state !== "playing") {
+    return {
+      x: width * 0.5 + Math.sin(millis() * 0.0014) * width * 0.25,
+      y: height * 0.54 + Math.cos(millis() * 0.0018) * height * 0.2
+    };
+  }
+
+  const mg = currentMinigame();
+  if (!mg) return { x: currentX, y: currentY };
+  const m = game.mini || {};
+  const now = millis();
+
+  if (mg.name === "TAP TARGETS") {
+    const live = (m.targets || []).filter(t => !t.popping);
+    if (live.length) {
+      live.sort((a, b) => {
+        const da = dist(currentX, currentY, a.x, a.y) * 0.25 + (a.lifeMs - (now - a.birthMs));
+        const db = dist(currentX, currentY, b.x, b.y) * 0.25 + (b.lifeMs - (now - b.birthMs));
+        return da - db;
+      });
+      return { x: live[0].x, y: live[0].y };
+    }
+  }
+
+  if (mg.name === "DODGE") {
+    const lookaheadBase = CONFIG.BOT_EXTRA_LOOKAHEAD_MS * (1 + (game.runtime.currentDifficulty || game.difficulty) * 0.2);
+    const obstacles = m.obstacles || [];
+    const sweepObstacles = obstacles.filter(o => o.kind === "sweep");
+    if (sweepObstacles.length >= max(1, floor(obstacles.length * 0.45))) {
+      const laneCount = 5;
+      let bestLane = 2;
+      let bestLaneScore = -Infinity;
+      const anchorX = width * 0.5;
+      for (let lane = 0; lane < laneCount; lane++) {
+        const laneY = map(lane + 0.5, 0, laneCount, 96, height - 96);
+        let score = -abs(laneY - currentY) * 0.24;
+        for (const o of sweepObstacles) {
+          for (let step = 1; step <= 4; step++) {
+            const frames = (lookaheadBase * (step / 4)) / 16.666;
+            const fx = o.x + (o.vx || 0) * frames;
+            const fy = o.y;
+            const dx = abs(anchorX - fx) - (o.w * 0.5 + CONFIG.CURSOR.size * 0.35);
+            const dy = abs(laneY - fy) - (o.h * 0.5 + CONFIG.CURSOR.size * 0.38);
+            const laneDanger = max(0, 170 - Math.hypot(max(0, dx), max(0, dy)) * 1.55);
+            score -= laneDanger * (1 + step * 0.25);
+          }
+        }
+        if (score > bestLaneScore) {
+          bestLaneScore = score;
+          bestLane = lane;
+        }
+      }
+      return {
+        x: width * 0.5,
+        y: map(bestLane + 0.5, 0, laneCount, 96, height - 96)
+      };
+    }
+
+    let best = { x: width * 0.5, y: height * 0.56 };
+    let bestScore = -Infinity;
+    for (let x = 84; x <= width - 84; x += 26) {
+      for (let y = 96; y <= height - 86; y += 24) {
+        let score = 0;
+        for (const o of (m.obstacles || [])) {
+          for (let step = 1; step <= 4; step++) {
+            const lookahead = lookaheadBase * (step / 4);
+            const frames = lookahead / 16.666;
+            const futureX = o.x + (o.vx || 0) * frames;
+            const futureY = o.y + (o.speed || 0) * frames;
+            const clearanceX = Math.abs(x - futureX) - (o.w * 0.5 + CONFIG.CURSOR.size * 0.38);
+            const clearanceY = Math.abs(y - futureY) - (o.h * 0.5 + CONFIG.CURSOR.size * 0.38);
+            const overlap = clearanceX < 0 && clearanceY < 0;
+            const edgeDistance = Math.hypot(Math.max(0, clearanceX), Math.max(0, clearanceY));
+            const danger = overlap ? 320 : Math.max(0, 190 - edgeDistance * 1.7);
+            score -= danger * (1 + step * 0.26);
+          }
+        }
+        score -= Math.abs(x - currentX) * 0.022;
+        score -= Math.abs(y - currentY) * 0.018;
+        score -= Math.abs(x - width * 0.5) * 0.004;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { x, y };
+        }
+      }
+    }
+    return best;
+  }
+
+  if (mg.name === "WHACK-A-MOLE") {
+    const active = (m.cells || []).filter(c => c.active);
+    if (active.length) {
+      active.sort((a, b) => {
+        const ta = now - a.activeMs;
+        const tb = now - b.activeMs;
+        const sa = ta * 1.2 - dist(currentX, currentY, a.x, a.y) * 0.32;
+        const sb = tb * 1.2 - dist(currentX, currentY, b.x, b.y) * 0.32;
+        return sb - sa;
+      });
+      return { x: active[0].x, y: active[0].y };
+    }
+  }
+
+  if (mg.name === "RED LIGHT GREEN LIGHT") {
+    if (m.phase === "green") {
+      const cps = m.checkpoints || [];
+      const baseIdx = constrain(m.progressIdx?.p1 ?? 1, 1, max(1, cps.length - 1));
+      let idx = baseIdx;
+      const current = cps[baseIdx];
+      if (current && dist(currentX, currentY, current.x, current.y) < current.r * 0.75) {
+        idx = min(cps.length - 1, baseIdx + 1);
+      }
+      const cp = cps[min(cps.length - 1, idx + 1)] || cps[idx];
+      if (cp) return { x: cp.x, y: cp.y };
+    }
+    const prev = m.prevPos?.p1;
+    if (prev) return { x: prev.x, y: prev.y };
+    return { x: currentX, y: currentY };
+  }
+
+  if (mg.name === "COLLECT & AVOID") {
+    const coins = (m.items || []).filter(it => it.type === "coin");
+    const bombs = (m.items || []).filter(it => it.type === "bomb");
+    const predictedBombs = bombs.map((b) => ({
+      x: b.x + (b.vx || 0) * 12,
+      y: b.y + (b.vy || 0) * 12,
+      r: b.radius * 1.28
+    }));
+    const safetyAt = (x, y) => {
+      let minClear = 9999;
+      let pressure = 0;
+      for (const b of predictedBombs) {
+        const clear = dist(x, y, b.x, b.y) - b.r;
+        minClear = min(minClear, clear);
+        pressure += 1 / max(26, clear + 34);
+      }
+      return {
+        minClear,
+        score: minClear - pressure * 560
+      };
+    };
+
+    if (predictedBombs.length) {
+      const nowSafe = safetyAt(currentX, currentY);
+      if (nowSafe.minClear < 126) {
+        let best = { x: currentX, y: currentY };
+        let bestScore = -Infinity;
+        for (let sx = 70; sx <= width - 70; sx += 34) {
+          for (let sy = 90; sy <= height - 60; sy += 30) {
+            const safe = safetyAt(sx, sy);
+            const moveCost = dist(currentX, currentY, sx, sy) * 0.07;
+            const edgePenalty = min(sx, width - sx, sy, height - sy) < 56 ? 22 : 0;
+            const score = safe.score - moveCost - edgePenalty;
+            if (score > bestScore) {
+              bestScore = score;
+              best = { x: sx, y: sy };
+            }
+          }
+        }
+        return best;
+      }
+    }
+
+    if (coins.length) {
+      let best = null;
+      let bestScore = -Infinity;
+      for (const c of coins) {
+        const safe = safetyAt(c.x, c.y);
+        let segmentDanger = 0;
+        for (const b of predictedBombs) {
+          const dSeg = segmentPointDistance(currentX, currentY, c.x, c.y, b.x, b.y);
+          segmentDanger += max(0, 150 - dSeg);
+        }
+        const d = dist(currentX, currentY, c.x, c.y);
+        const score = safe.score * 1.05 - d * 0.12 - segmentDanger * 2.55;
+        if (score > bestScore) {
+          bestScore = score;
+          best = c;
+        }
+      }
+      if (best && bestScore > 36) {
+        return { x: best.x, y: best.y };
+      }
+    }
+    if (bombs.length || coins.length) {
+      let best = { x: width * 0.5, y: height * 0.5 };
+      let bestSafety = -Infinity;
+      for (let sx = 80; sx <= width - 80; sx += 34) {
+        for (let sy = 100; sy <= height - 70; sy += 30) {
+          const safe = safetyAt(sx, sy);
+          const stickiness = dist(currentX, currentY, sx, sy) * 0.05;
+          const safety = safe.score - stickiness;
+          if (safety > bestSafety) {
+            bestSafety = safety;
+            best = { x: sx, y: sy };
+          }
+        }
+      }
+      return best;
+    }
+  }
+
+  if (mg.name === "TRACE THE PATH") {
+    if (Array.isArray(m.points) && m.points.length) {
+      const idx = Math.min((m.idx || 0) + 3, m.points.length - 1);
+      return { x: m.points[idx].x, y: m.points[idx].y };
+    }
+  }
+
+  if (mg.name === "RHYTHM RUSH") {
+    const notes = (m.notes || []).filter(n => !n.hit && !n.missed);
+    if (notes.length) {
+      notes.sort((a, b) => {
+        const ta = abs((now - a.spawnMs) - (m.approachMs || 800));
+        const tb = abs((now - b.spawnMs) - (m.approachMs || 800));
+        const da = dist(currentX, currentY, a.x, a.y);
+        const db = dist(currentX, currentY, b.x, b.y);
+        return (ta + da * 0.28) - (tb + db * 0.28);
+      });
+      return { x: notes[0].x, y: notes[0].y };
+    }
+  }
+
+  return { x: width * 0.5, y: height * 0.5 };
+}
+
+function cycleInputMode() {
+  const order = ["auto", "mouse", "tag"];
+  const idx = order.indexOf(game.runtime.inputMode);
+  game.runtime.inputMode = order[(idx + 1) % order.length];
+  if (game.runtime.inputMode !== "auto") {
+    game.demo.forced = false;
+  }
+}
+
+function withRuntimeQuery(path) {
+  return runtimeQueryString ? `${path}${runtimeQueryString}` : path;
+}
+
+function applyURLOverrides() {
+  const params = new URLSearchParams(window.location.search);
+  runtimeQueryString = window.location.search || "";
+
+  const wsParam = params.get("ws");
+  if (wsParam) {
+    CONFIG.WS_URL = wsParam;
+  }
+
+  const tag1 = Number(params.get("tag1"));
+  if (Number.isFinite(tag1)) {
+    CONFIG.PLAYER_TAGS.p1 = tag1;
+    game.players.p1.tagId = tag1;
+  }
+  const tag2 = Number(params.get("tag2"));
+  if (Number.isFinite(tag2)) {
+    CONFIG.PLAYER_TAGS.p2 = tag2;
+    game.players.p2.tagId = tag2;
+  }
+  applySharedCalibrationToPlayer(game.players.p1);
+  applySharedCalibrationToPlayer(game.players.p2);
+
+  const input = (params.get("input") || "").toLowerCase();
+  if (["auto", "mouse", "tag"].includes(input)) {
+    game.runtime.inputMode = input;
+  }
+
+  const bot = (params.get("bot") || "").toLowerCase();
+  if (["1", "true", "on", "yes"].includes(bot)) {
+    game.runtime.botAssist = true;
+  }
+
+}
+
+function triggerShake(intensity, duration) {
+  game.effects.shake.active = true;
+  game.effects.shake.intensity = intensity;
+  game.effects.shake.duration = duration;
+  game.effects.shake.startMs = millis();
+}
+
+function applyScreenShake() {
+  const s = game.effects.shake;
+  if (!s.active) return;
+  const elapsed = millis() - s.startMs;
+  if (elapsed >= s.duration) {
+    s.active = false;
+    return;
+  }
+  const decay = 1 - elapsed / s.duration;
+  translate(random(-1, 1) * s.intensity * decay, random(-1, 1) * s.intensity * decay);
+}
+
+function triggerFlash(color, duration, alpha = 120) {
+  game.effects.flash.active = true;
+  game.effects.flash.color = color;
+  game.effects.flash.duration = duration;
+  game.effects.flash.startMs = millis();
+  game.effects.flash.alpha = alpha;
+}
+
+function drawScreenFlash() {
+  const f = game.effects.flash;
+  if (!f.active) return;
+  const elapsed = millis() - f.startMs;
+  if (elapsed >= f.duration) {
+    f.active = false;
+    return;
+  }
+  const a = map(elapsed, 0, f.duration, f.alpha, 0);
+  noStroke();
+  fill(f.color[0], f.color[1], f.color[2], a);
+  rect(0, 0, width, height);
+}
+
+function emitParticles(x, y, color, count = 12, maxSpeed = 5) {
+  for (let i = 0; i < count; i++) {
+    const ang = random(TWO_PI);
+    const spd = random(0.7, maxSpeed);
+    game.effects.gameParticles.push({
+      x,
+      y,
+      vx: cos(ang) * spd,
+      vy: sin(ang) * spd,
+      size: random(3, 8),
+      alpha: 255,
+      decay: random(4, 8),
+      color: [...color]
+    });
+  }
+}
+
+function drawGameParticles() {
+  for (let i = game.effects.gameParticles.length - 1; i >= 0; i--) {
+    const p = game.effects.gameParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.06;
+    p.vx *= 0.99;
+    p.alpha -= p.decay;
+    p.size *= 0.986;
+
+    if (p.alpha <= 0 || p.size <= 0.7) {
+      game.effects.gameParticles.splice(i, 1);
+      continue;
+    }
+
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function spawnImpactRing(x, y, color, startR = 20, endR = 210, duration = 360, thickness = 3) {
+  game.effects.impactRings.push({
+    x, y,
+    color: [...color],
+    startR,
+    endR,
+    duration,
+    thickness,
+    bornMs: millis()
+  });
+}
+
+function drawImpactRings() {
+  const now = millis();
+  for (let i = game.effects.impactRings.length - 1; i >= 0; i--) {
+    const r = game.effects.impactRings[i];
+    const t = constrain((now - r.bornMs) / r.duration, 0, 1);
+    if (t >= 1) {
+      game.effects.impactRings.splice(i, 1);
+      continue;
+    }
+    const rr = lerp(r.startR, r.endR, t);
+    const a = lerp(190, 0, t);
+    noFill();
+    stroke(r.color[0], r.color[1], r.color[2], a);
+    strokeWeight(r.thickness * (1 - t * 0.65));
+    circle(r.x, r.y, rr * 2);
+  }
+}
+
+function addFloatingScore(x, y, textValue, color = CONFIG.COLORS.green) {
+  game.effects.floatingScores.push({
+    x,
+    y,
+    text: textValue,
+    alpha: 255,
+    vy: -2.5,
+    life: 50,
+    maxLife: 50,
+    color
+  });
+}
+
+function drawFloatingScores() {
+  for (let i = game.effects.floatingScores.length - 1; i >= 0; i--) {
+    const f = game.effects.floatingScores[i];
+    f.y += f.vy;
+    f.vy *= 0.94;
+    f.life -= 1;
+    f.alpha = map(f.life, 0, f.maxLife, 0, 255);
+
+    if (f.life <= 0) {
+      game.effects.floatingScores.splice(i, 1);
+      continue;
+    }
+
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(26);
+    text(f.text, f.x, f.y);
+  }
+}
+
+function updateEffects() {
+  // Reserved for optional sound hooks and future global effects.
+}
+
+function styleGroupIndexFromScore(score) {
+  const total = STYLE_GROUPS.length;
+  if (!total) return 0;
+  const bucket = floor(max(0, score) / STYLE_GROUP_SCORE_STEP);
+  return ((bucket % total) + total) % total;
+}
+
+function currentStyleGroup() {
+  const total = STYLE_GROUPS.length;
+  if (!total) return null;
+  const idx = ((game.ui.styleGroupIndex % total) + total) % total;
+  return STYLE_GROUPS[idx];
+}
+
+function scoreForNextStyleGroup() {
+  const s = max(0, game.score);
+  return (floor(s / STYLE_GROUP_SCORE_STEP) + 1) * STYLE_GROUP_SCORE_STEP;
+}
+
+function updateStyleGroupByScore() {
+  const next = styleGroupIndexFromScore(game.score);
+  if (next === game.ui.styleGroupIndex) return;
+  game.ui.styleGroupIndex = next;
+  const g = currentStyleGroup();
+  if (g) {
+    triggerFlash(g.accent || CONFIG.COLORS.cyan, 180, 60);
+    addFloatingScore(width * 0.5, height * 0.16, g.name, g.accent || CONFIG.COLORS.cyan);
+  }
+}
+
+function transitionStyleName(idx) {
+  return TRANSITION_STYLE_NAMES[((idx % 4) + 4) % 4];
+}
+
+function buildMinigames() {
+  minigames = [
+    makeTapTargetsMinigame(),
+    makeDodgeMinigame(),
+    makeWhackAMoleMinigame(),
+    makeRedLightMinigame(),
+    makeCollectAvoidMinigame(),
+    makeRhythmRushMinigame(),
+    makeTracePathMinigame()
+  ];
+}
+
+function makeTapTargetsMinigame() {
+  return {
+    name: "TAP TARGETS",
+    description: "Pop enough targets before time runs out",
+    color: CONFIG.COLORS.cyan,
+    duration: 8500,
+    setup(difficulty) {
+      game.mini = {
+        targets: [],
+        spawnMs: millis(),
+        spawnInterval: 850 / sqrt(difficulty),
+        tapped: 0,
+        required: max(5, floor(6 + difficulty * 1.8)),
+        maxTargets: min(8, 4 + floor(difficulty)),
+        palette: [CONFIG.COLORS.cyan, CONFIG.COLORS.lime, CONFIG.COLORS.orange, CONFIG.COLORS.magenta],
+        spawnMode: random(["scatter", "ring", "edge_rush", "diagonal_wave"]),
+        waveTick: 0
+      };
+      for (let i = 0; i < 3; i++) spawnTapTarget(difficulty, game.mini);
+    },
+    update(players, difficulty) {
+      const m = game.mini;
+      if (millis() - m.spawnMs >= m.spawnInterval && m.targets.length < m.maxTargets) {
+        spawnTapTarget(difficulty, m);
+        m.spawnMs = millis();
+      }
+
+      for (let i = m.targets.length - 1; i >= 0; i--) {
+        const t = m.targets[i];
+        if (!t.popping) {
+          t.x += t.vx;
+          t.y += t.vy;
+          if (t.x < t.radius || t.x > width - t.radius) t.vx *= -1;
+          if (t.y < 90 + t.radius || t.y > height - 42 - t.radius) t.vy *= -1;
+          t.x = constrain(t.x, t.radius, width - t.radius);
+          t.y = constrain(t.y, 90 + t.radius, height - 42 - t.radius);
+        }
+        const age = millis() - t.birthMs;
+        if (!t.popping && age > t.lifeMs) {
+          m.targets.splice(i, 1);
+          continue;
+        }
+
+        if (t.popping) {
+          if (millis() - t.popMs > 300) {
+            m.targets.splice(i, 1);
+          }
+          continue;
+        }
+
+        for (const p of players) {
+          if (cursorOverlapsCircle(p, t.x, t.y, t.radius)) {
+            p.hoverActive = true;
+            t.popping = true;
+            t.popMs = millis();
+            m.tapped++;
+            game.score += 10;
+            addFloatingScore(t.x, t.y, "+10", CONFIG.COLORS.green);
+            emitParticles(t.x, t.y, t.color, floor(random(12, 16)), 5.5);
+            break;
+          }
+        }
+      }
+
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      for (const t of m.targets) {
+        if (t.popping) {
+          const p = constrain((millis() - t.popMs) / 300, 0, 1);
+          const s = lerp(1, 1.6, p);
+          const a = lerp(200, 0, p);
+          drawTargetGlow(t.x, t.y, t.radius * s, t.color, a);
+          noFill();
+          stroke(255, a);
+          strokeWeight(2);
+          circle(t.x, t.y, t.radius * 2 * s);
+          continue;
+        }
+
+        const lifePct = constrain((millis() - t.birthMs) / t.lifeMs, 0, 1);
+        const drawR = t.radius * lerp(1, 0.7, lifePct);
+        drawTargetGlow(t.x, t.y, drawR, t.color, 180);
+
+        stroke(t.color[0], t.color[1], t.color[2], 220);
+        strokeWeight(2);
+        fill(t.color[0], t.color[1], t.color[2], 55);
+        circle(t.x, t.y, drawR * 2);
+
+        if (lifePct > 0.7) {
+          const pulse = 1 + sin(millis() * 0.02) * 0.12;
+          noFill();
+          stroke(...CONFIG.COLORS.red, 180);
+          strokeWeight(2);
+          circle(t.x, t.y, drawR * 2.4 * pulse);
+        }
+      }
+
+      fill(255, 220);
+      textAlign(CENTER, TOP);
+      textStyle(700);
+      textSize(24);
+      text(`Tapped: ${m.tapped} / ${m.required}`, width / 2, 62);
+    },
+    getStatusText() {
+      return `Goal: pop ${game.mini.required} targets (${game.mini.spawnMode})`;
+    },
+    onTimeout() {
+      const m = game.mini;
+      const success = m.tapped >= m.required;
+      return {
+        success,
+        points: success ? 30 + floor((game.runtime.currentDifficulty || game.difficulty) * 6) : 0
+      };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function pickTapTargetSpawnPoint(m, radius) {
+  const margin = 110 + radius;
+  if (m.spawnMode === "ring") {
+    const a = random(TWO_PI);
+    const rr = min(width, height) * random(0.2, 0.34);
+    return {
+      x: constrain(width * 0.5 + cos(a) * rr, margin, width - margin),
+      y: constrain(height * 0.5 + sin(a) * rr, margin, height - margin)
+    };
+  }
+  if (m.spawnMode === "edge_rush") {
+    const side = floor(random(4));
+    if (side === 0) return { x: margin, y: random(margin, height - margin) };
+    if (side === 1) return { x: width - margin, y: random(margin, height - margin) };
+    if (side === 2) return { x: random(margin, width - margin), y: margin };
+    return { x: random(margin, width - margin), y: height - margin };
+  }
+  if (m.spawnMode === "diagonal_wave") {
+    const t = (m.waveTick % 8) / 7;
+    m.waveTick++;
+    return {
+      x: lerp(margin, width - margin, t),
+      y: lerp(margin, height - margin, 1 - t)
+    };
+  }
+  return {
+    x: random(margin, width - margin),
+    y: random(margin, height - margin)
+  };
+}
+
+function spawnTapTarget(difficulty, m = game.mini) {
+  const radius = random(28, 52) / pow(difficulty, 0.58);
+  const point = pickTapTargetSpawnPoint(m, radius);
+  const drift = random(0.18, 0.65) * pow(difficulty, 0.42);
+  const ang = random(TWO_PI);
+  let vx = cos(ang) * drift;
+  let vy = sin(ang) * drift;
+  if (m.spawnMode === "edge_rush") {
+    const toCenter = createVector(width * 0.5 - point.x, height * 0.5 - point.y).normalize();
+    vx = toCenter.x * drift * 1.6;
+    vy = toCenter.y * drift * 1.6;
+  }
+  m.targets.push({
+    x: point.x,
+    y: point.y,
+    radius,
+    lifeMs: random(1800, 3200) / pow(difficulty, 0.9),
+    birthMs: millis(),
+    color: random(m.palette),
+    vx,
+    vy,
+    popping: false,
+    popMs: 0
+  });
+}
+
+function drawTargetGlow(x, y, r, color, alpha) {
+  noStroke();
+  for (let i = 9; i >= 1; i--) {
+    const rr = map(i, 1, 9, r * 0.75, r * 2.0);
+    const a = map(i, 1, 9, alpha * 0.18, 0);
+    fill(color[0], color[1], color[2], a);
+    circle(x, y, rr * 2);
+  }
+}
+
+function makeDodgeMinigame() {
+  return {
+    name: "DODGE",
+    description: "Avoid hazard patterns",
+    color: CONFIG.COLORS.red,
+    duration: 11000,
+    setup(difficulty) {
+      game.mini = {
+        obstacles: [],
+        spawnMs: millis(),
+        spawnInterval: max(230, 690 / pow(difficulty, 1.18)),
+        scoreTickMs: millis(),
+        survivalTicks: 0,
+        pattern: random(["rain", "sweep", "lanes"]),
+        patternShiftMs: millis() + random(2200, 3600),
+        laneSeed: floor(random(1, 4))
+      };
+    },
+    update(players, difficulty) {
+      const m = game.mini;
+      if (millis() >= m.patternShiftMs) {
+        m.pattern = random(["rain", "sweep", "lanes"]);
+        m.patternShiftMs = millis() + random(2200, 3600) / max(1, sqrt(difficulty));
+      }
+
+      const spawnInterval = m.pattern === "sweep" ? m.spawnInterval * 1.5 : m.spawnInterval;
+      while (millis() - m.spawnMs >= spawnInterval) {
+        m.spawnMs += spawnInterval;
+        const obstacle = makeDodgeObstacle(difficulty, m.pattern, m.laneSeed, m);
+        if (obstacle) m.obstacles.push(obstacle);
+      }
+
+      if (millis() - m.scoreTickMs >= 500) {
+        m.scoreTickMs += 500;
+        m.survivalTicks++;
+        game.score += 5;
+      }
+
+      for (let i = m.obstacles.length - 1; i >= 0; i--) {
+        const o = m.obstacles[i];
+        o.x += o.vx || 0;
+        o.y += o.speed;
+        o.rot += o.rotSpeed;
+        if (o.y - o.h * 1.2 > height || o.x < -180 || o.x > width + 180) {
+          m.obstacles.splice(i, 1);
+          continue;
+        }
+
+        for (const p of players) {
+          if (circleRectHit(p.screenX, p.screenY, getCursorCollisionRadius(p), o)) {
+            p.hoverActive = true;
+            return { done: true, success: false, points: 0 };
+          }
+        }
+      }
+
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      for (const o of m.obstacles) {
+        push();
+        translate(o.x, o.y);
+        rotate(o.rot);
+
+        noStroke();
+        fill(...CONFIG.COLORS.red, 35);
+        rect(-o.w * 0.6, -o.h * 0.8, o.w * 1.2, o.h * 1.6, 12);
+
+        fill(...CONFIG.COLORS.red, 225);
+        rect(-o.w * 0.5, -o.h * 0.5, o.w, o.h, 8);
+
+        stroke(255, 120);
+        strokeWeight(2);
+        line(-o.w * 0.42, -o.h * 0.35, o.w * 0.42, -o.h * 0.35);
+        if (o.kind === "sweep") {
+          stroke(255, 190);
+          line(-o.w * 0.2, o.h * 0.35, o.w * 0.2, o.h * 0.35);
+        }
+        pop();
+      }
+    },
+    getStatusText() {
+      return `Pattern: ${game.mini.pattern.toUpperCase()} - survive until timer ends`;
+    },
+    onTimeout() {
+      return { success: true, points: 0 };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function makeDodgeObstacle(difficulty, pattern, laneSeed = 1, runtime = null) {
+  if (pattern === "sweep") {
+    const ref = runtime || game.mini || {};
+    const obstacles = Array.isArray(ref.obstacles) ? ref.obstacles : [];
+    const lanes = 5;
+    const laneLoad = Array.from({ length: lanes }, () => 0);
+    const centerUsed = new Set();
+    for (const o of obstacles) {
+      if (o.kind !== "sweep") continue;
+      if (!Number.isFinite(o.lane)) continue;
+      if (o.lane < 0 || o.lane >= lanes) continue;
+      laneLoad[o.lane] += 1;
+      if (abs(o.x - width * 0.5) < width * 0.58) {
+        centerUsed.add(o.lane);
+      }
+    }
+    if (centerUsed.size >= lanes - 1) return null;
+
+    const minLoad = Math.min(...laneLoad);
+    const lanePool = [];
+    for (let i = 0; i < lanes; i++) {
+      if (laneLoad[i] <= minLoad + 1 && !centerUsed.has(i)) lanePool.push(i);
+    }
+    if (!lanePool.length) return null;
+    const lane = random(lanePool);
+
+    let side = ref.sweepSide || (random() < 0.5 ? -1 : 1);
+    ref.sweepSide = -side;
+    const laneY = map(lane + 0.5, 0, lanes, 96, height - 96);
+    const w = random(92, 150) * pow(difficulty, 0.38);
+    return {
+      x: side < 0 ? -w * 0.6 : width + w * 0.6,
+      y: laneY,
+      w,
+      h: random(22, 30),
+      speed: 0,
+      vx: side * random(3.4, 5.4) * pow(difficulty, 0.82),
+      rot: random(-0.2, 0.2),
+      rotSpeed: random(-0.024, 0.024),
+      lane,
+      kind: "sweep"
+    };
+  }
+
+  const w = random(50, 102) * pow(difficulty, 0.56);
+  const h = random(18, 30);
+  const lanes = 5 + laneSeed;
+  const lane = floor(random(lanes));
+  const laneX = map(lane + 0.5, 0, lanes, 60, width - 60);
+  return {
+    x: pattern === "lanes" ? laneX : random(40 + w * 0.5, width - 40 - w * 0.5),
+    y: -30,
+    w,
+    h,
+    speed: random(3.4, 7.8) * pow(difficulty, 1.12),
+    vx: pattern === "lanes" ? random(-0.5, 0.5) : 0,
+    rot: random(-0.2, 0.2),
+    rotSpeed: random(-0.015, 0.015),
+    kind: pattern
+  };
+}
+
+function circleRectHit(cx, cy, cr, rectObj) {
+  const left = rectObj.x - rectObj.w * 0.5;
+  const right = rectObj.x + rectObj.w * 0.5;
+  const top = rectObj.y - rectObj.h * 0.5;
+  const bottom = rectObj.y + rectObj.h * 0.5;
+
+  const nearestX = constrain(cx, left, right);
+  const nearestY = constrain(cy, top, bottom);
+  return dist(cx, cy, nearestX, nearestY) < cr;
+}
+
+function makeWhackAMoleMinigame() {
+  return {
+    name: "WHACK-A-MOLE",
+    description: "Whack enough moles before timeout",
+    color: CONFIG.COLORS.lime,
+    duration: 10000,
+    setup(difficulty) {
+      const cells = makeWhackCells();
+
+      game.mini = {
+        cells,
+        spawnMs: millis(),
+        spawnInterval: max(170, 760 / pow(difficulty, 0.86)),
+        activeLimit: min(4, 2 + floor(difficulty * 0.9)),
+        activeLifetime: max(520, 1450 / pow(difficulty, 0.85)),
+        whackedCount: 0,
+        requiredWhacks: max(6, floor(8 + difficulty * 2.2) - (isUwbControlActive() ? 1 : 0)),
+        spawnPattern: random(["single", "burst", "sweep"]),
+        sweepIdx: 0
+      };
+      spawnWhackWave();
+      spawnWhackWave();
+    },
+    update(players, difficulty) {
+      const m = game.mini;
+      while (millis() - m.spawnMs >= m.spawnInterval) {
+        m.spawnMs += m.spawnInterval;
+        spawnWhackWave();
+      }
+
+      for (const cell of m.cells) {
+        if (cell.active && millis() - cell.activeMs > m.activeLifetime) {
+          cell.active = false;
+        }
+
+        for (const p of players) {
+          if (!cell.active) continue;
+          if (pointInCell(p.screenX, p.screenY, cell)) {
+            p.hoverActive = true;
+            cell.active = false;
+            cell.whacked = true;
+            cell.whackedMs = millis();
+            m.whackedCount++;
+            game.score += 15;
+            addFloatingScore(cell.x, cell.y, "+15", CONFIG.COLORS.lime);
+            emitParticles(cell.x, cell.y, CONFIG.COLORS.lime, 12, 5);
+          }
+        }
+
+        if (cell.whacked && millis() - cell.whackedMs > 400) {
+          cell.whacked = false;
+        }
+      }
+
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      for (const cell of m.cells) {
+        noStroke();
+        fill(255, 12);
+        rectMode(CENTER);
+        rect(cell.x, cell.y, cell.size, cell.size, 12);
+
+        if (cell.active) {
+          const lifePct = constrain((millis() - cell.activeMs) / m.activeLifetime, 0, 1);
+          const pulse = 1 + sin(millis() * 0.015) * 0.12;
+          drawTargetGlow(cell.x, cell.y, cell.size * 0.22 * pulse, CONFIG.COLORS.lime, 210);
+
+          fill(...CONFIG.COLORS.lime, 220);
+          circle(cell.x, cell.y, cell.size * 0.36);
+
+          if (lifePct > 0.6) {
+            noFill();
+            stroke(...CONFIG.COLORS.red, 180);
+            strokeWeight(2);
+            circle(cell.x, cell.y, cell.size * 0.56 * (1 + game.runtime.hoverPulse * 0.15));
+          }
+        }
+
+        if (cell.whacked) {
+          const p = constrain((millis() - cell.whackedMs) / 400, 0, 1);
+          const s = lerp(1, 0.78, p);
+          const a = lerp(180, 0, p);
+          noStroke();
+          fill(...CONFIG.COLORS.lime, a);
+          rect(cell.x, cell.y, cell.size * s, cell.size * s, 12);
+        }
+      }
+      fill(255, 220);
+      textAlign(CENTER, TOP);
+      textStyle(700);
+      textSize(22);
+      text(`Whacked: ${m.whackedCount} / ${m.requiredWhacks}`, width / 2, 62);
+      rectMode(CORNER);
+    },
+    getStatusText() {
+      const m = game.mini;
+      return `Goal: whack ${m.requiredWhacks} moles (${m.spawnPattern})`;
+    },
+    onTimeout() {
+      const m = game.mini;
+      const success = m.whackedCount >= m.requiredWhacks;
+      return {
+        success,
+        points: success ? 40 + floor((game.runtime.currentDifficulty || game.difficulty) * 8) : 0
+      };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function makeWhackCells() {
+  const cells = [];
+  const gap = constrain(min(width, height) * 0.015, 8, 14);
+  const availableW = min(width * 0.66, 520);
+  const availableH = min(height * 0.48, 360);
+  const size = constrain(min((availableW - gap * 2) / 3, (availableH - gap * 2) / 3), 74, 108);
+  const cx = width * 0.5;
+  const cy = constrain(height * 0.57, 124 + size * 1.5, height - 48 - size * 1.5);
+
+  const total = size * 3 + gap * 2;
+  const ox = cx - total * 0.5;
+  const oy = cy - total * 0.5;
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const x = ox + c * (size + gap) + size * 0.5;
+      const y = oy + r * (size + gap) + size * 0.5;
+      cells.push({ x, y, size, active: false, activeMs: 0, whacked: false, whackedMs: 0 });
+    }
+  }
+  return cells;
+}
+
+function spawnWhackWave() {
+  const m = game.mini;
+  if (m.spawnPattern === "burst") {
+    const n = 1 + floor(random(1, 3));
+    for (let i = 0; i < n; i++) {
+      trySpawnMole();
+    }
+    return;
+  }
+
+  if (m.spawnPattern === "sweep") {
+    let active = m.cells.filter(c => c.active).length;
+    if (active >= m.activeLimit) return;
+    const ordered = [...m.cells].sort((a, b) => (a.x - b.x) || (a.y - b.y));
+    for (let i = 0; i < 2; i++) {
+      if (active >= m.activeLimit) break;
+      const idx = (m.sweepIdx + i) % ordered.length;
+      const cell = ordered[idx];
+      if (!cell.active) {
+        cell.active = true;
+        cell.activeMs = millis();
+        active++;
+      }
+    }
+    m.sweepIdx = (m.sweepIdx + 2) % ordered.length;
+    return;
+  }
+
+  trySpawnMole();
+}
+
+function trySpawnMole() {
+  const m = game.mini;
+  const active = m.cells.filter(c => c.active).length;
+  if (active >= m.activeLimit) return;
+  const options = m.cells.filter(c => !c.active);
+  if (!options.length) return;
+  const chosen = random(options);
+  chosen.active = true;
+  chosen.activeMs = millis();
+}
+
+function pointInCell(x, y, cell) {
+  return abs(x - cell.x) <= cell.size * 0.5 && abs(y - cell.y) <= cell.size * 0.5;
+}
+
+function nextRedLightPhaseDuration(phase, difficulty, pattern) {
+  if (pattern === "flicker") {
+    return phase === "green"
+      ? random(900, 1700) / max(1, pow(difficulty, 0.92))
+      : random(700, 1300) * min(1.12, 1 + (difficulty - 1) * 0.06);
+  }
+  if (pattern === "long_red") {
+    return phase === "green"
+      ? random(1500, 2500) / max(1, pow(difficulty, 0.85))
+      : random(1500, 2800) * min(1.2, 1 + (difficulty - 1) * 0.08);
+  }
+  return phase === "green"
+    ? random(1700, 3200) / max(1, pow(difficulty, 1.1))
+    : random(1200, 2200) * min(1.16, 1 + (difficulty - 1) * 0.05);
+}
+
+function redLightReachedCheckpoint(px, py, checkpoints, idx) {
+  const safeIdx = constrain(idx, 1, checkpoints.length - 1);
+  const target = checkpoints[safeIdx];
+  const prev = checkpoints[max(0, safeIdx - 1)];
+  const rr = target.r + CONFIG.CURSOR.size * 0.34;
+  if (dist(px, py, target.x, target.y) <= rr) return true;
+
+  const segD = segmentPointDistance(prev.x, prev.y, target.x, target.y, px, py);
+  const segLen = max(1, dist(prev.x, prev.y, target.x, target.y));
+  const travel = ((px - prev.x) * (target.x - prev.x) + (py - prev.y) * (target.y - prev.y)) / (segLen * segLen);
+  return segD <= rr * 0.88 && travel >= 0.7;
+}
+
+function makeRedLightMinigame() {
+  return {
+    name: "RED LIGHT GREEN LIGHT",
+    description: "Pass each gate on green, freeze cleanly on red",
+    color: CONFIG.COLORS.orange,
+    duration: 12000,
+    setup(difficulty) {
+      const margin = 92;
+      const routeType = random(["lr", "rl", "tb", "bt"]);
+      let startPoint = { x: margin, y: height * 0.55 };
+      let endPoint = { x: width - margin, y: height * 0.55 };
+      if (routeType === "rl") {
+        startPoint = { x: width - margin, y: height * 0.55 };
+        endPoint = { x: margin, y: height * 0.55 };
+      } else if (routeType === "tb") {
+        startPoint = { x: width * 0.5, y: height - margin };
+        endPoint = { x: width * 0.5, y: margin };
+      } else if (routeType === "bt") {
+        startPoint = { x: width * 0.5, y: margin };
+        endPoint = { x: width * 0.5, y: height - margin };
+      }
+
+      const checkpoints = [];
+      const cpCount = 6;
+      for (let i = 0; i < cpCount; i++) {
+        const t = i / (cpCount - 1);
+        const x = lerp(startPoint.x, endPoint.x, t);
+        const y = lerp(startPoint.y, endPoint.y, t);
+        const wobble = (routeType === "lr" || routeType === "rl") ? sin(t * PI * 2) * 56 : cos(t * PI * 2) * 56;
+        checkpoints.push({
+          x: constrain((routeType === "lr" || routeType === "rl") ? x : x + wobble, 90, width - 90),
+          y: constrain((routeType === "lr" || routeType === "rl") ? y + wobble : y, 90, height - 90),
+          r: max(28, 44 - difficulty * 1.8)
+        });
+      }
+
+      const now = millis();
+      const phasePattern = random(["steady", "flicker", "long_red"]);
+      const penaltyMode = random(["step_back", "stun", "combo"]);
+      game.mini = {
+        phase: "green",
+        phasePattern,
+        phaseEndMs: now + nextRedLightPhaseDuration("green", difficulty, phasePattern),
+        phaseStartMs: now,
+        redGraceMs: 260,
+        penaltyMode,
+        routeType,
+        startPoint,
+        endPoint,
+        checkpoints,
+        progressIdx: {
+          p1: 1,
+          p2: 1
+        },
+        violationCooldown: {
+          p1: 0,
+          p2: 0
+        },
+        redStrikes: {
+          p1: 0,
+          p2: 0
+        },
+        stunUntil: {
+          p1: 0,
+          p2: 0
+        },
+        prevPos: {
+          p1: null,
+          p2: null
+        }
+      };
+    },
+    update(players, difficulty) {
+      const m = game.mini;
+      const cps = m.checkpoints;
+      const now = millis();
+
+      if (now >= m.phaseEndMs) {
+        if (m.phase === "green") {
+          m.phase = "red";
+          m.phaseEndMs = now + nextRedLightPhaseDuration("red", difficulty, m.phasePattern);
+        } else {
+          m.phase = "green";
+          m.phaseEndMs = now + nextRedLightPhaseDuration("green", difficulty, m.phasePattern);
+        }
+        m.phaseStartMs = now;
+        for (const p of players) {
+          const key = p.label === "P1" ? "p1" : "p2";
+          m.prevPos[key] = { x: p.screenX, y: p.screenY };
+        }
+      }
+
+      for (const p of players) {
+        const key = p.label === "P1" ? "p1" : "p2";
+        if (now < m.stunUntil[key]) {
+          m.prevPos[key] = { x: p.screenX, y: p.screenY };
+          continue;
+        }
+
+        if (m.phase === "green") {
+          m.redStrikes[key] = 0;
+          const idx = constrain(m.progressIdx[key], 1, cps.length - 1);
+          if (redLightReachedCheckpoint(p.screenX, p.screenY, cps, idx)) {
+            m.progressIdx[key] = min(cps.length, idx + 1);
+            const target = cps[idx];
+            emitParticles(target.x, target.y, p.color, 8, 3.6);
+          }
+        } else if (m.prevPos[key]) {
+          const delta = dist(p.screenX, p.screenY, m.prevPos[key].x, m.prevPos[key].y);
+          const redElapsed = now - m.phaseStartMs;
+          const moveThreshold = game.runtime.inputMode === "tag" ? 8.8 : 7.2;
+          if (redElapsed > m.redGraceMs && now >= m.violationCooldown[key] && delta > moveThreshold) {
+            m.redStrikes[key]++;
+            if (m.penaltyMode === "stun") {
+              m.stunUntil[key] = now + 480;
+            } else if (m.penaltyMode === "combo" && m.redStrikes[key] >= 2) {
+              m.progressIdx[key] = max(1, m.progressIdx[key] - 2);
+              m.redStrikes[key] = 0;
+            } else {
+              m.progressIdx[key] = max(1, m.progressIdx[key] - 1);
+            }
+            m.violationCooldown[key] = now + 320;
+            triggerFlash(CONFIG.COLORS.red, 240, 95);
+            triggerShake(5, 170);
+          }
+        }
+
+        m.prevPos[key] = { x: p.screenX, y: p.screenY };
+
+        if (dist(p.screenX, p.screenY, m.endPoint.x, m.endPoint.y) <= 44) {
+          return { done: true, success: true, points: 70 };
+        }
+        if (m.progressIdx[key] >= cps.length) {
+          return { done: true, success: true, points: 70 };
+        }
+      }
+
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      const phaseColor = m.phase === "green" ? CONFIG.COLORS.green : CONFIG.COLORS.red;
+      const horizontal = m.routeType === "lr" || m.routeType === "rl";
+
+      // Dark track base
+      drawRedLightTrack(m.checkpoints, [12, 16, 28, 210], horizontal ? 96 : 92);
+
+      // Lane fill
+      drawRedLightTrack(m.checkpoints, [130, 168, 220, 95], horizontal ? 78 : 74);
+
+      // Bright center line
+      drawRedLightTrack(m.checkpoints, [230, 236, 250, 168], 4.5);
+
+      drawStartFinishBadge(m.startPoint.x, m.startPoint.y, "START", [118, 212, 255]);
+      drawStartFinishBadge(m.endPoint.x, m.endPoint.y, "FINISH", [255, 188, 120]);
+
+      for (let i = 0; i < m.checkpoints.length; i++) {
+        const cp = m.checkpoints[i];
+        const filled = i < m.progressIdx.p1;
+        const gateW = horizontal ? 14 : cp.r * 1.9;
+        const gateH = horizontal ? cp.r * 1.9 : 14;
+        noStroke();
+        fill(0, 0, 0, 130);
+        rectMode(CENTER);
+        rect(cp.x, cp.y, gateW + 7, gateH + 7, 6);
+        fill(filled ? 94 : 220, filled ? 246 : 220, filled ? 255 : 220, filled ? 220 : 125);
+        rect(cp.x, cp.y, gateW, gateH, 6);
+      }
+      rectMode(CORNER);
+
+      fill(phaseColor[0], phaseColor[1], phaseColor[2], m.phase === "green" ? 15 : 22);
+      rect(0, 0, width, height);
+
+      drawHoloTrafficLight(m.phase, width * 0.5, 74);
+
+      const p1Idx = constrain(m.progressIdx.p1, 1, m.checkpoints.length - 1);
+      const p1Target = m.checkpoints[p1Idx];
+      drawProgressDot(p1Target.x, p1Target.y, CONFIG.CURSOR.p1Color);
+      if (game.twoPlayerMode && game.players.p2.active) {
+        const p2Idx = constrain(m.progressIdx.p2, 1, m.checkpoints.length - 1);
+        const p2Target = m.checkpoints[p2Idx];
+        drawProgressDot(p2Target.x, p2Target.y, CONFIG.CURSOR.p2Color);
+      }
+    },
+    getStatusText() {
+      const m = game.mini;
+      return `Move on green. Red penalty: ${m.penaltyMode.replace("_", " ")}`;
+    },
+    onTimeout() {
+      return { success: false, points: 0 };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function drawProgressDot(x, y, color) {
+  drawTargetGlow(x, y, 18, color, 180);
+  fill(color[0], color[1], color[2], 230);
+  noStroke();
+  circle(x, y, 20);
+}
+
+function drawStartFinishBadge(x, y, label, rgb) {
+  const w = 92;
+  const h = 34;
+  noStroke();
+  fill(8, 12, 24, 190);
+  rectMode(CENTER);
+  rect(x, y - 44, w, h, 10);
+  stroke(rgb[0], rgb[1], rgb[2], 210);
+  strokeWeight(2);
+  noFill();
+  rect(x, y - 44, w, h, 10);
+  noStroke();
+  fill(240, 246, 255, 230);
+  textAlign(CENTER, CENTER);
+  textStyle(700);
+  textSize(14);
+  text(label, x, y - 45);
+  noFill();
+  stroke(rgb[0], rgb[1], rgb[2], 160);
+  strokeWeight(2.5);
+  circle(x, y, 34);
+  rectMode(CORNER);
+}
+
+function drawHoloTrafficLight(phase, x, y) {
+  const active = phase === "green" ? CONFIG.COLORS.green : CONFIG.COLORS.red;
+  const idle = [255, 255, 255];
+  drawGlassPanel(x - 112, y - 28, 224, 56, 16, 20);
+  const labels = [
+    { key: "red", tx: x - 58, c: CONFIG.COLORS.red },
+    { key: "green", tx: x + 58, c: CONFIG.COLORS.green }
+  ];
+  for (const l of labels) {
+    const on = l.key === phase;
+    drawTargetGlow(l.tx, y, 14, on ? l.c : idle, on ? 180 : 40);
+    noStroke();
+    fill(l.c[0], l.c[1], l.c[2], on ? 240 : 75);
+    circle(l.tx, y, on ? 20 : 15);
+  }
+  textAlign(CENTER, CENTER);
+  textStyle(800);
+  textSize(20);
+  fill(active[0], active[1], active[2], 230);
+  text(phase === "green" ? "GO" : "HOLD", x, y + 1);
+}
+
+function drawRedLightTrack(checkpoints, strokeCol, weight) {
+  if (!checkpoints.length) return;
+  noFill();
+  stroke(strokeCol[0], strokeCol[1], strokeCol[2], strokeCol[3]);
+  strokeWeight(weight);
+  beginShape();
+  const first = checkpoints[0];
+  const last = checkpoints[checkpoints.length - 1];
+  curveVertex(first.x, first.y);
+  for (const cp of checkpoints) curveVertex(cp.x, cp.y);
+  curveVertex(last.x, last.y);
+  endShape();
+}
+
+function makeCollectAvoidMinigame() {
+  return {
+    name: "COLLECT & AVOID",
+    description: "Collect enough coins while bombs hunt you",
+    color: CONFIG.COLORS.green,
+    duration: 10500,
+    setup(difficulty) {
+      game.mini = {
+        items: [],
+        spawnMs: millis(),
+        spawnInterval: max(220, 560 / pow(difficulty, 0.95)),
+        coinsCollected: 0,
+        requiredCoins: max(6, floor(8 + difficulty * 2.2) - (isUwbControlActive() ? 1 : 0)),
+        spawnStyle: random(["scatter", "lanes", "corners", "cluster"]),
+        bombAI: random(["homing", "orbit", "ambush"])
+      };
+    },
+    update(players, difficulty) {
+      const m = game.mini;
+
+      if (millis() - m.spawnMs >= m.spawnInterval) {
+        m.spawnMs = millis();
+        spawnCollectItem(difficulty, m);
+      }
+
+      for (let i = m.items.length - 1; i >= 0; i--) {
+        const it = m.items[i];
+        if (millis() - it.birthMs > 5000) {
+          m.items.splice(i, 1);
+          continue;
+        }
+
+        it.x += it.vx;
+        it.y += it.vy;
+
+        if (it.type === "bomb" && players.length) {
+          let nearest = players[0];
+          let nearestD = dist(it.x, it.y, nearest.screenX, nearest.screenY);
+          for (const p of players) {
+            const d = dist(it.x, it.y, p.screenX, p.screenY);
+            if (d < nearestD) {
+              nearest = p;
+              nearestD = d;
+            }
+          }
+          const ax = nearest.screenX - it.x;
+          const ay = nearest.screenY - it.y;
+          const len = Math.hypot(ax, ay) || 1;
+          const steer = min(0.07, 0.018 + difficulty * 0.006);
+          if (m.bombAI === "orbit") {
+            const tx = -ay / len;
+            const ty = ax / len;
+            it.vx += tx * steer * 1.2 + (ax / len) * steer * 0.2;
+            it.vy += ty * steer * 1.2 + (ay / len) * steer * 0.2;
+          } else if (m.bombAI === "ambush") {
+            const predX = nearest.screenX + nearest.velocity.x * 16;
+            const predY = nearest.screenY + nearest.velocity.y * 16;
+            const px = predX - it.x;
+            const py = predY - it.y;
+            const plen = Math.hypot(px, py) || 1;
+            it.vx += (px / plen) * steer * 1.25;
+            it.vy += (py / plen) * steer * 1.25;
+          } else {
+            it.vx += (ax / len) * steer;
+            it.vy += (ay / len) * steer;
+          }
+          const maxSpd = 2.2 + difficulty * 0.55;
+          const v = Math.hypot(it.vx, it.vy);
+          if (v > maxSpd) {
+            it.vx = (it.vx / v) * maxSpd;
+            it.vy = (it.vy / v) * maxSpd;
+          }
+        }
+
+        if (it.x - it.radius < 0 || it.x + it.radius > width) it.vx *= -1;
+        if (it.y - it.radius < 0 || it.y + it.radius > height) it.vy *= -1;
+
+        for (const p of players) {
+          if (cursorOverlapsCircle(p, it.x, it.y, it.radius)) {
+            p.hoverActive = true;
+            if (it.type === "coin") {
+              game.score += 10;
+              m.coinsCollected++;
+              addFloatingScore(it.x, it.y, "+10", CONFIG.COLORS.green);
+              emitParticles(it.x, it.y, CONFIG.COLORS.green, 11, 5);
+              m.items.splice(i, 1);
+            } else {
+              triggerShake(9, 280);
+              triggerFlash(CONFIG.COLORS.red, 280, 110);
+              spawnImpactRing(it.x, it.y, CONFIG.COLORS.red, 18, 180, 260, 3.5);
+              return { done: true, success: false, points: 0 };
+            }
+            break;
+          }
+        }
+      }
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      for (const it of m.items) {
+        const bob = sin((millis() - it.birthMs) * 0.008) * 2;
+        if (it.type === "coin") {
+          drawTargetGlow(it.x, it.y + bob, it.radius, CONFIG.COLORS.green, 190);
+          const drew = drawSpriteScreen("coin", it.x, it.y + bob, it.radius * 2.6, 245);
+          if (!drew) {
+            noStroke();
+            fill(...CONFIG.COLORS.green, 230);
+            circle(it.x, it.y + bob, it.radius * 2);
+          }
+        } else {
+          drawTargetGlow(it.x, it.y, it.radius, CONFIG.COLORS.red, 200);
+          const drew = drawSpriteScreen("bomb", it.x, it.y, it.radius * 2.6, 245);
+          if (!drew) {
+            noStroke();
+            fill(...CONFIG.COLORS.red, 220);
+            circle(it.x, it.y, it.radius * 2);
+            stroke(30, 10, 10, 220);
+            strokeWeight(3);
+            line(it.x - it.radius * 0.45, it.y - it.radius * 0.45, it.x + it.radius * 0.45, it.y + it.radius * 0.45);
+            line(it.x + it.radius * 0.45, it.y - it.radius * 0.45, it.x - it.radius * 0.45, it.y + it.radius * 0.45);
+          }
+          noFill();
+          stroke(...CONFIG.COLORS.red, 160);
+          circle(it.x, it.y, it.radius * 2.5 * (1 + game.runtime.hoverPulse * 0.08));
+        }
+      }
+      fill(255, 220);
+      textAlign(CENTER, TOP);
+      textStyle(700);
+      textSize(22);
+      text(`Coins: ${m.coinsCollected} / ${m.requiredCoins}`, width / 2, 62);
+    },
+    getStatusText() {
+      const m = game.mini;
+      return `Goal: collect ${m.requiredCoins} coins (${m.spawnStyle}, ${m.bombAI})`;
+    },
+    onTimeout() {
+      const m = game.mini;
+      return { success: m.coinsCollected >= m.requiredCoins, points: m.coinsCollected * 7 };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function spawnCollectItem(difficulty, m = game.mini) {
+  const bombChance = lerp(0.34, 0.65, constrain((difficulty - 1) / 5, 0, 1));
+  const isBomb = random() < bombChance;
+  const speed = random(1.3, 3.8) * pow(difficulty, 0.56);
+  const ang = random(TWO_PI);
+  let x = random(40, width - 40);
+  let y = random(80, height - 40);
+
+  if (m.spawnStyle === "lanes") {
+    const lane = floor(random(4));
+    y = map(lane + 0.5, 0, 4, 90, height - 80);
+  } else if (m.spawnStyle === "corners") {
+    const corner = floor(random(4));
+    const cx = corner % 2 === 0 ? 65 : width - 65;
+    const cy = corner < 2 ? 100 : height - 80;
+    x = cx + random(-24, 24);
+    y = cy + random(-24, 24);
+  } else if (m.spawnStyle === "cluster" && !isBomb) {
+    x = width * 0.5 + random(-120, 120);
+    y = height * 0.5 + random(-95, 95);
+  }
+
+  m.items.push({
+    x: constrain(x, 40, width - 40),
+    y: constrain(y, 80, height - 40),
+    radius: random(20, 30),
+    vx: cos(ang) * speed,
+    vy: sin(ang) * speed,
+    type: isBomb ? "bomb" : "coin",
+    birthMs: millis()
+  });
+}
+
+function makeRhythmRushMinigame() {
+  return {
+    name: "RHYTHM RUSH",
+    description: "Hit notes as rings close in",
+    color: CONFIG.COLORS.magenta,
+    duration: 9000,
+    setup(difficulty) {
+      game.mini = {
+        notes: [],
+        spawnMs: millis(),
+        spawnInterval: max(260, 760 / pow(difficulty, 0.92)),
+        approachMs: max(420, 920 / pow(difficulty, 0.68)),
+        hitWindowMs: max(80, 170 / pow(difficulty, 0.32)) + (isUwbControlActive() ? 18 : 0),
+        hits: 0,
+        misses: 0,
+        requiredHits: max(6, floor(9 + difficulty * 2.4) - (isUwbControlActive() ? 1 : 0)),
+        maxMisses: max(2, 4 - floor((difficulty - 1) * 0.5))
+      };
+      for (let i = 0; i < 2; i++) spawnRhythmNote();
+    },
+    update(players) {
+      const m = game.mini;
+      const now = millis();
+
+      while (now - m.spawnMs >= m.spawnInterval) {
+        m.spawnMs += m.spawnInterval;
+        spawnRhythmNote();
+      }
+
+      for (const note of m.notes) {
+        if (note.hit || note.missed) continue;
+        const age = now - note.spawnMs;
+        if (age > m.approachMs + m.hitWindowMs) {
+          note.missed = true;
+          note.resolveMs = now;
+          m.misses++;
+          triggerFlash(CONFIG.COLORS.red, 120, 42);
+          spawnImpactRing(note.x, note.y, CONFIG.COLORS.red, 8, 90, 180, 2.4);
+          continue;
+        }
+
+        for (const p of players) {
+          if (!cursorOverlapsCircle(p, note.x, note.y, note.baseRadius)) continue;
+          const timingErr = abs(age - m.approachMs);
+          if (timingErr <= m.hitWindowMs) {
+            note.hit = true;
+            note.resolveMs = now;
+            m.hits++;
+            game.score += 12;
+            addFloatingScore(note.x, note.y, "+12", CONFIG.COLORS.magenta);
+            emitParticles(note.x, note.y, CONFIG.COLORS.magenta, 10, 4.5);
+            spawnImpactRing(note.x, note.y, CONFIG.COLORS.magenta, 8, 90, 180, 2.2);
+            p.hoverActive = true;
+            break;
+          }
+        }
+      }
+
+      for (let i = m.notes.length - 1; i >= 0; i--) {
+        const n = m.notes[i];
+        if ((n.hit || n.missed) && millis() - n.resolveMs > 330) {
+          m.notes.splice(i, 1);
+        }
+      }
+
+      if (m.misses > m.maxMisses) {
+        return { done: true, success: false, points: 0 };
+      }
+      if (m.hits >= m.requiredHits) {
+        return { done: true, success: true, points: 65 + floor((game.runtime.currentDifficulty || game.difficulty) * 8) };
+      }
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      const now = millis();
+      for (const note of m.notes) {
+        if (note.hit || note.missed) {
+          const p = constrain((now - note.resolveMs) / 330, 0, 1);
+          if (note.hit) {
+            const a = lerp(220, 0, p);
+            const s = lerp(1, 1.8, p);
+            drawTargetGlow(note.x, note.y, note.baseRadius * s, CONFIG.COLORS.magenta, a);
+          } else {
+            const a = lerp(220, 0, p);
+            stroke(...CONFIG.COLORS.red, a);
+            strokeWeight(4);
+            const rr = note.baseRadius * (1.4 + p * 0.3);
+            line(note.x - rr, note.y - rr, note.x + rr, note.y + rr);
+            line(note.x + rr, note.y - rr, note.x - rr, note.y + rr);
+          }
+          continue;
+        }
+
+        const age = now - note.spawnMs;
+        const p = constrain(age / m.approachMs, 0, 1.4);
+        const ringRadius = lerp(note.baseRadius * 4, note.baseRadius * 1.05, min(1, p));
+
+        noFill();
+        stroke(...CONFIG.COLORS.magenta, 210);
+        strokeWeight(2.5);
+        circle(note.x, note.y, ringRadius * 2);
+
+        drawTargetGlow(note.x, note.y, note.baseRadius, CONFIG.COLORS.magenta, 180);
+        const drew = drawSpriteScreen("rhythm", note.x, note.y, note.baseRadius * 2.4, 245, sin((now - note.spawnMs) * 0.01) * 0.05);
+        if (!drew) {
+          fill(...CONFIG.COLORS.magenta, 220);
+          noStroke();
+          circle(note.x, note.y, note.baseRadius * 2);
+          fill(255, 190);
+          circle(note.x, note.y, note.baseRadius * 0.8);
+        }
+      }
+
+      fill(255, 220);
+      textAlign(CENTER, TOP);
+      textStyle(700);
+      textSize(22);
+      text(`Hits ${m.hits}/${m.requiredHits}   Misses ${m.misses}/${m.maxMisses}`, width / 2, 62);
+    },
+    getStatusText() {
+      const m = game.mini;
+      return `Hit ${m.requiredHits} notes before ${m.maxMisses + 1} misses`;
+    },
+    onTimeout() {
+      const m = game.mini;
+      const success = m.hits >= m.requiredHits && m.misses <= m.maxMisses;
+      return { success, points: success ? 70 : 0 };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function spawnRhythmNote() {
+  const m = game.mini;
+  const margin = 130;
+  const baseRadius = 26;
+  let x = random(margin, width - margin);
+  let y = random(150, height - 150);
+
+  if (m.notes.length) {
+    const prev = m.notes[m.notes.length - 1];
+    let attempts = 0;
+    while (dist(prev.x, prev.y, x, y) < 140 && attempts < 8) {
+      x = random(margin, width - margin);
+      y = random(150, height - 150);
+      attempts++;
+    }
+  }
+
+  m.notes.push({
+    x,
+    y,
+    baseRadius,
+    spawnMs: millis(),
+    hit: false,
+    missed: false,
+    resolveMs: 0
+  });
+}
+
+function makeTracePathMinigame() {
+  return {
+    name: "TRACE THE PATH",
+    description: "Trace fast or fail",
+    color: CONFIG.COLORS.orange,
+    duration: 9000,
+    setup(difficulty) {
+      const points = generateTracePath(difficulty);
+      game.mini = {
+        points,
+        idx: 0
+      };
+    },
+    update(players) {
+      const m = game.mini;
+      if (!m.points.length) return null;
+      const current = m.points[m.idx];
+      for (const p of players) {
+        if (cursorOverlapsCircle(p, current.x, current.y, 30)) {
+          p.hoverActive = true;
+          m.idx = min(m.idx + 1, m.points.length - 1);
+          if (m.idx >= m.points.length - 1) {
+            return { done: true, success: true, points: 80 };
+          }
+        }
+      }
+      return null;
+    },
+    draw() {
+      const m = game.mini;
+      if (!m.points.length) return;
+
+      noFill();
+      stroke(255, 40);
+      strokeWeight(20);
+      beginShape();
+      for (const pt of m.points) vertex(pt.x, pt.y);
+      endShape();
+
+      stroke(...CONFIG.COLORS.green, 190);
+      strokeWeight(12);
+      beginShape();
+      for (let i = 0; i <= m.idx; i++) {
+        const pt = m.points[i];
+        vertex(pt.x, pt.y);
+      }
+      endShape();
+
+      const cur = m.points[m.idx];
+      drawTargetGlow(cur.x, cur.y, 22, CONFIG.COLORS.lime, 210);
+      fill(...CONFIG.COLORS.lime, 230);
+      noStroke();
+      circle(cur.x, cur.y, 18);
+
+      fill(...CONFIG.COLORS.green, 230);
+      circle(m.points[0].x, m.points[0].y, 22);
+
+      fill(255, 220);
+      circle(m.points[m.points.length - 1].x, m.points[m.points.length - 1].y, 22);
+
+      const pct = floor((m.idx / (m.points.length - 1)) * 100);
+      fill(255, 230);
+      textAlign(CENTER, TOP);
+      textStyle(800);
+      textSize(26);
+      text(`${pct}%`, width / 2, 62);
+    },
+    getStatusText() {
+      const m = game.mini;
+      const pct = floor((m.idx / Math.max(1, m.points.length - 1)) * 100);
+      return `Goal: reach 58%+ trace (${pct}%)`;
+    },
+    onTimeout() {
+      const m = game.mini;
+      const pct = m.points.length > 1 ? m.idx / (m.points.length - 1) : 0;
+      const success = pct >= 0.58;
+      return {
+        success,
+        points: success ? floor(pct * 80) : 0
+      };
+    },
+    getPoints() {
+      return 0;
+    }
+  };
+}
+
+function generateTracePath(difficulty) {
+  const controlCount = floor(random(5, 8 + min(3, floor((difficulty - 1) * 1.8))));
+  const controls = [];
+  const margin = 120;
+  const style = random(["horizontal", "vertical", "zigzag", "spiral"]);
+
+  for (let i = 0; i < controlCount; i++) {
+    let x;
+    let y;
+    if (style === "horizontal") {
+      x = map(i, 0, controlCount - 1, margin, width - margin) + random(-40, 40);
+      y = random(margin, height - margin);
+    } else if (style === "vertical") {
+      x = random(margin, width - margin);
+      y = map(i, 0, controlCount - 1, margin, height - margin) + random(-40, 40);
+    } else if (style === "zigzag") {
+      x = map(i, 0, controlCount - 1, margin, width - margin);
+      y = i % 2 === 0 ? margin + random(0, 120) : height - margin - random(0, 120);
+    } else {
+      const a = map(i, 0, controlCount - 1, -PI * 0.8, PI * 1.6);
+      const rr = map(i, 0, controlCount - 1, min(width, height) * 0.08, min(width, height) * 0.32);
+      x = width * 0.5 + cos(a) * rr + random(-20, 20);
+      y = height * 0.5 + sin(a) * rr + random(-20, 20);
+    }
+    controls.push({
+      x: constrain(x, margin, width - margin),
+      y: constrain(y, margin, height - margin)
+    });
+  }
+
+  const pts = [];
+  const total = floor(100 + difficulty * 8);
+  for (let i = 0; i < total; i++) {
+    const t = i / (total - 1);
+    const p = catmullRomSample(controls, t);
+    pts.push(p);
+  }
+  return pts;
+}
+
+function catmullRomSample(points, t) {
+  const l = points.length;
+  const p = (l - 1) * t;
+  const intPoint = floor(p);
+  const w = p - intPoint;
+
+  const p0 = points[max(0, intPoint - 1)];
+  const p1 = points[intPoint];
+  const p2 = points[min(l - 1, intPoint + 1)];
+  const p3 = points[min(l - 1, intPoint + 2)];
+
+  const x = catmull(p0.x, p1.x, p2.x, p3.x, w);
+  const y = catmull(p0.y, p1.y, p2.y, p3.y, w);
+  return { x, y };
+}
+
+function catmull(p0, p1, p2, p3, t) {
+  return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t);
+}
+
+class LowPassFilter {
+  constructor(alpha, initVal = 0) {
+    this.y = initVal;
+    this.s = initVal;
+    this.initialized = false;
+    this.setAlpha(alpha);
+  }
+
+  setAlpha(alpha) {
+    this.alpha = alpha;
+  }
+
+  filter(value) {
+    let result;
+    if (this.initialized) {
+      result = this.alpha * value + (1 - this.alpha) * this.s;
+    } else {
+      result = value;
+      this.initialized = true;
+    }
+    this.y = value;
+    this.s = result;
+    return result;
+  }
+
+  hasLastRawValue() {
+    return this.initialized;
+  }
+
+  lastRawValue() {
+    return this.y;
+  }
+
+  reset(value = 0) {
+    this.y = value;
+    this.s = value;
+    this.initialized = false;
+  }
+}
+
+class OneEuroFilter {
+  constructor(freq, minCutoff = 1.0, beta = 0.0, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.x = new LowPassFilter(this.alpha(minCutoff));
+    this.dx = new LowPassFilter(this.alpha(dCutoff));
+    this.lastTime = null;
+  }
+
+  alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+
+  filter(value, timestamp = null) {
+    if (this.lastTime !== null && timestamp !== null) {
+      const dt = timestamp - this.lastTime;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+
+    const dValue = this.x.hasLastRawValue() ? (value - this.x.lastRawValue()) * this.freq : 0.0;
+    const edValue = this.dx.filter(dValue);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue);
+    this.x.setAlpha(this.alpha(cutoff));
+    return this.x.filter(value);
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UWB Arcade Menu</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: rgb(10, 10, 15);
+      font-family: "Outfit", sans-serif;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script>
+const CONFIG = {
+  WS_URL: "ws://localhost:8765",
+  UWB_BOUNDS: { xMin: 0, xMax: 4, yMin: 0, yMax: 3 },
+  PLAYER_TAGS: { p1: 1, p2: 2 },
+  CURSOR: {
+    size: 24,
+    trailLength: 12,
+    p1Color: [0, 210, 255],
+    p2Color: [255, 50, 200]
+  },
+  DEMO_TIMEOUT_MS: 3000,
+  WORLD_PADDING: 100,
+  PLAYER_ACTIVE_TIMEOUT_MS: 1200,
+  FILTER: {
+    minCutoff: 1.0,
+    beta: 0.007,
+    dCutoff: 1.0,
+    freq: 20
+  }
+};
+
+const CARDS = [
+  { name: "SUIKA", tag: "Drop & Merge", color: [255, 166, 84], file: "suika.html", icon: "suika" },
+  { name: "RUNNER", tag: "Dodge & Dash", color: [72, 228, 255], file: "runner.html", icon: "runner" },
+  { name: "WARIOWARE", tag: "Micro Madness", color: [255, 221, 88], file: "warioware.html", icon: "wario" },
+  { name: "FRUIT NINJA", tag: "Slice & Dice", color: [130, 255, 120], file: "fruit_ninja.html", icon: "ninja" },
+  { name: "BREAKOUT", tag: "Brick Breaker", color: [255, 110, 222], file: "breakout.html", icon: "breakout" },
+  { name: "MINIGAMES", tag: "Party Mix", color: [245, 245, 255], file: "cursor_game.html", icon: "minis" }
+];
+
+const game = {
+  players: {
+    p1: createPlayer(CONFIG.PLAYER_TAGS.p1, "P1", CONFIG.CURSOR.p1Color),
+    p2: createPlayer(CONFIG.PLAYER_TAGS.p2, "P2", CONFIG.CURSOR.p2Color)
+  },
+  ws: {
+    socket: null,
+    connected: false,
+    reconnectTimer: null,
+    lastDataMs: 0,
+    packetCount: 0,
+    parseErrors: 0,
+    lastTag: null
+  },
+  demo: {
+    enabled: true,
+    forced: false
+  },
+  cards: {
+    hoverIndex: -1,
+    hoverStartMs: 0,
+    dwellMs: 1500
+  },
+  ambientParticles: [],
+  effects: {
+    flash: { active: false, startMs: 0, duration: 0, color: [255, 255, 255], alpha: 0 },
+    shake: { active: false, startMs: 0, duration: 0, intensity: 0 },
+    burstParticles: [],
+    floatingScores: []
+  },
+  input: {
+    prevMouseDown: false
+  },
+  navigateTo: ""
+};
+let runtimeQueryString = "";
+const SHARED_CALIBRATION_KEY = "uwb_room_calibration_v1";
+
+function isValidBounds(bounds) {
+  if (!bounds) return false;
+  const xMin = Number(bounds.xMin);
+  const xMax = Number(bounds.xMax);
+  const yMin = Number(bounds.yMin);
+  const yMax = Number(bounds.yMax);
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax) && xMax > xMin && yMax > yMin;
+}
+
+function readSharedCalibrationBounds(tagId = CONFIG.PLAYER_TAGS.p1) {
+  try {
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const byTag = payload && payload.tags ? payload.tags[String(tagId)] : null;
+    if (isValidBounds(byTag)) return byTag;
+    if (isValidBounds(payload && payload.global)) return payload.global;
+  } catch (err) {}
+  return null;
+}
+
+function resolveUwbBoundsForTag(tagId = CONFIG.PLAYER_TAGS.p1) {
+  return readSharedCalibrationBounds(tagId) || CONFIG.UWB_BOUNDS;
+}
+
+function createPlayer(tagId, label, color) {
+  return {
+    tagId,
+    label,
+    color,
+    active: false,
+    screenX: null,
+    screenY: null,
+    rawX: null,
+    rawY: null,
+    lastUpdateMs: 0,
+    trail: [],
+    filters: null
+  };
+}
+
+function ensurePlayerFilters(player) {
+  if (player.filters) return;
+  player.filters = {
+    x: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff),
+    y: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff)
+  };
+}
+
+function preload() {}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  textFont("Outfit");
+  applyURLOverrides();
+  initializeAmbientParticles();
+  connectWebSocket();
+  exposeAutomationHooks();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  initializeAmbientParticles();
+}
+
+function draw() {
+  updateDemoMode();
+  pruneStalePlayers();
+  updatePlayerTrails();
+  updateEffects();
+
+  drawBackground();
+  drawAmbientParticles();
+
+  push();
+  applyScreenShake();
+  drawMenuTitle();
+  drawMenuCards();
+  drawBottomStatus();
+  drawBurstParticles();
+  drawFloatingScores();
+  drawCursors();
+  pop();
+
+  drawConnectionIndicator();
+  drawDemoBadge();
+  drawScreenFlash();
+
+  if (game.navigateTo) {
+    const url = game.navigateTo;
+    game.navigateTo = "";
+    window.location.href = url;
+  }
+
+  game.input.prevMouseDown = mouseIsPressed;
+}
+
+function drawBackground() {
+  background(10, 10, 15);
+  noStroke();
+  for (let i = 0; i < 4; i++) {
+    const x = width * (0.2 + i * 0.22) + sin(millis() * 0.0003 + i * 1.6) * 40;
+    const y = height * (0.2 + (i % 2) * 0.3) + cos(millis() * 0.0004 + i) * 50;
+    fill(60 + i * 20, 90 + i * 10, 130 + i * 15, 20);
+    circle(x, y, 260 + i * 100);
+  }
+}
+
+function drawMenuTitle() {
+  textAlign(CENTER, CENTER);
+  fill(255, 245);
+  textStyle(900);
+  textSize(min(72, width * 0.09));
+  text("UWB ARCADE", width * 0.5, 90);
+
+  textStyle(400);
+  textSize(18);
+  fill(255, 140);
+  text("Move to select a game", width * 0.5, 136);
+}
+
+function computeCardLayout() {
+  const cols = width < 960 ? 2 : 3;
+  const rows = ceil(CARDS.length / cols);
+  const cardW = min(220, width * (cols === 3 ? 0.25 : 0.38));
+  const cardH = min(160, height * 0.19);
+  const gapX = min(28, width * 0.025);
+  const gapY = min(24, height * 0.022);
+  const totalW = cols * cardW + (cols - 1) * gapX;
+  const totalH = rows * cardH + (rows - 1) * gapY;
+  const startX = width * 0.5 - totalW * 0.5;
+  const startY = height * 0.24;
+
+  const rects = [];
+  for (let i = 0; i < CARDS.length; i++) {
+    const col = i % cols;
+    const row = floor(i / cols);
+    rects.push({
+      x: startX + col * (cardW + gapX),
+      y: startY + row * (cardH + gapY),
+      w: cardW,
+      h: cardH,
+      r: 12
+    });
+  }
+  return rects;
+}
+
+function drawMenuCards() {
+  const rects = computeCardLayout();
+  const activePlayers = getActivePlayers();
+  let hovered = -1;
+
+  for (let i = 0; i < CARDS.length; i++) {
+    const c = CARDS[i];
+    const rectObj = rects[i];
+    const isHovered = activePlayers.some((p) => cursorOverlapsRect(p, rectObj));
+    const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+
+    if (isHovered || mouseHover) {
+      hovered = i;
+      if (mouseIsPressed && !game.input.prevMouseDown) {
+        selectCard(i);
+      }
+    }
+
+    drawSingleCard(c, rectObj, isHovered || mouseHover, i);
+  }
+
+  updateCardDwell(hovered);
+}
+
+function drawSingleCard(card, rectObj, hovered, idx) {
+  const now = millis();
+  const isDwelling = idx === game.cards.hoverIndex;
+  const dwellProgress = isDwelling ? constrain((now - game.cards.hoverStartMs) / game.cards.dwellMs, 0, 1) : 0;
+
+  const glowAlpha = hovered ? 70 : 22;
+  noStroke();
+  fill(card.color[0], card.color[1], card.color[2], glowAlpha);
+  rect(rectObj.x - 4, rectObj.y - 4, rectObj.w + 8, rectObj.h + 8, rectObj.r + 4);
+
+  const scale = hovered ? 1.03 : 1;
+  const dw = rectObj.w * scale;
+  const dh = rectObj.h * scale;
+  const dx = rectObj.x + (rectObj.w - dw) * 0.5;
+  const dy = rectObj.y + (rectObj.h - dh) * 0.5;
+
+  noStroke();
+  fill(hovered ? 26 : 18, hovered ? 26 : 18, hovered ? 38 : 28, 240);
+  rect(dx, dy, dw, dh, rectObj.r);
+
+  stroke(card.color[0], card.color[1], card.color[2], hovered ? 170 : 60);
+  strokeWeight(2);
+  noFill();
+  rect(dx, dy, dw, dh, rectObj.r);
+
+  drawCardIcon(card.icon, dx + dw * 0.5, dy + dh * 0.42, min(dw, dh) * 0.22, card.color, hovered);
+
+  noStroke();
+  textAlign(CENTER, CENTER);
+  fill(250, 250, 255, 238);
+  textStyle(800);
+  textSize(20);
+  text(card.name, dx + dw * 0.5, dy + dh * 0.72);
+
+  fill(230, 230, 245, 130);
+  textStyle(500);
+  textSize(12);
+  text(card.tag, dx + dw * 0.5, dy + dh * 0.84);
+
+  if (dwellProgress > 0) {
+    const cx = dx + dw - 24;
+    const cy = dy + 24;
+    noFill();
+    stroke(255, 120);
+    strokeWeight(3);
+    circle(cx, cy, 24);
+    stroke(card.color[0], card.color[1], card.color[2], 230);
+    arc(cx, cy, 24, 24, -HALF_PI, -HALF_PI + TWO_PI * dwellProgress);
+  }
+}
+
+function drawCardIcon(icon, x, y, s, color, hovered) {
+  push();
+  translate(x, y);
+  stroke(color[0], color[1], color[2], hovered ? 255 : 200);
+  strokeWeight(3);
+  noFill();
+
+  if (icon === "suika") {
+    circle(0, 0, s * 2);
+    circle(-s * 0.35, -s * 0.15, s * 0.55);
+    circle(s * 0.3, s * 0.2, s * 0.45);
+  } else if (icon === "runner") {
+    line(-s * 0.6, s * 0.7, -s * 0.6, -s * 0.7);
+    line(0, s * 0.7, 0, -s * 0.7);
+    line(s * 0.6, s * 0.7, s * 0.6, -s * 0.7);
+  } else if (icon === "wario") {
+    line(-s * 0.5, -s * 0.2, -s * 0.1, -s * 0.2);
+    line(-s * 0.1, -s * 0.2, -s * 0.25, s * 0.15);
+    line(-s * 0.25, s * 0.15, s * 0.3, s * 0.15);
+    line(s * 0.3, s * 0.15, s * 0.05, s * 0.65);
+  } else if (icon === "ninja") {
+    line(-s * 0.6, s * 0.6, s * 0.6, -s * 0.6);
+  } else if (icon === "breakout") {
+    rectMode(CENTER);
+    rect(0, s * 0.45, s * 1.25, s * 0.22, 4);
+    for (let i = -1; i <= 1; i++) {
+      circle(i * s * 0.4, -s * 0.15, s * 0.25);
+    }
+    rectMode(CORNER);
+  } else if (icon === "minis") {
+    rectMode(CENTER);
+    const q = s * 0.42;
+    rect(-q, -q, s * 0.4, s * 0.4, 3);
+    rect(q, -q, s * 0.4, s * 0.4, 3);
+    rect(-q, q, s * 0.4, s * 0.4, 3);
+    rect(q, q, s * 0.4, s * 0.4, 3);
+    rectMode(CORNER);
+  }
+  pop();
+}
+
+function updateCardDwell(hoveredIndex) {
+  if (hoveredIndex !== game.cards.hoverIndex) {
+    game.cards.hoverIndex = hoveredIndex;
+    game.cards.hoverStartMs = hoveredIndex >= 0 ? millis() : 0;
+    return;
+  }
+  if (hoveredIndex < 0) return;
+
+  const dwell = millis() - game.cards.hoverStartMs;
+  if (dwell >= game.cards.dwellMs) {
+    selectCard(hoveredIndex);
+  }
+}
+
+function selectCard(index) {
+  const card = CARDS[index];
+  if (!card) return;
+  triggerFlash(card.color, 220, 110);
+  triggerShake(4, 180);
+  emitParticles(width * 0.5, height * 0.5, card.color, 24, 6);
+  game.navigateTo = withRuntimeQuery(card.file);
+}
+
+function pointInRect(x, y, rectObj) {
+  return x >= rectObj.x && x <= rectObj.x + rectObj.w && y >= rectObj.y && y <= rectObj.y + rectObj.h;
+}
+
+function cursorOverlapsRect(player, rectObj) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  const nx = constrain(player.screenX, rectObj.x, rectObj.x + rectObj.w);
+  const ny = constrain(player.screenY, rectObj.y, rectObj.y + rectObj.h);
+  const rr = CONFIG.CURSOR.size * 0.5;
+  return dist(player.screenX, player.screenY, nx, ny) <= rr;
+}
+
+function drawBottomStatus() {
+  const y = height - 28;
+  textAlign(CENTER, CENTER);
+  textStyle(500);
+  textSize(13);
+  const p1 = game.players.p1.active ? "P1 online" : "P1 waiting";
+  const p2 = game.players.p2.active ? "P2 online" : "P2 idle";
+  const ws = game.ws.connected ? "WS connected" : "WS offline";
+  const mode = game.demo.enabled ? "DEMO mouse fallback" : "TAG mode";
+  fill(255, 170);
+  text(`${ws}  |  ${p1}  |  ${p2}  |  ${mode}`, width * 0.5, y);
+}
+
+function getActivePlayers() {
+  const out = [];
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (p.active && p.screenX !== null && p.screenY !== null) out.push(p);
+  }
+  return out;
+}
+
+function updatePlayerTrails() {
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    p.trail.unshift({ x: p.screenX, y: p.screenY });
+    if (p.trail.length > CONFIG.CURSOR.trailLength) p.trail.length = CONFIG.CURSOR.trailLength;
+  }
+}
+
+function drawCursors() {
+  const showP2Label = game.players.p2.active;
+  for (const p of [game.players.p1, game.players.p2]) {
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    drawCursorTrail(p);
+    drawCursorGlow(p);
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], 220);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size);
+    fill(255, 180);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size * 0.35);
+    if (showP2Label) {
+      fill(255, 200);
+      textAlign(CENTER, BOTTOM);
+      textStyle(700);
+      textSize(12);
+      text(p.label, p.screenX, p.screenY - CONFIG.CURSOR.size * 0.7);
+    }
+  }
+}
+
+function drawCursorTrail(player) {
+  const tlen = player.trail.length;
+  for (let i = tlen - 1; i >= 0; i--) {
+    const pt = player.trail[i];
+    const n = i / max(1, tlen - 1);
+    const size = lerp(4, CONFIG.CURSOR.size, 1 - n);
+    const alpha = lerp(0, 180, 1 - n) * 0.35;
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(pt.x, pt.y, size);
+  }
+}
+
+function drawCursorGlow(player) {
+  const layers = 12;
+  const maxR = CONFIG.CURSOR.size * 2.5;
+  for (let i = layers; i >= 1; i--) {
+    const r = map(i, 1, layers, CONFIG.CURSOR.size * 0.5, maxR);
+    const alpha = map(i, 1, layers, 30, 0);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(player.screenX, player.screenY, r);
+  }
+}
+
+function initializeAmbientParticles() {
+  game.ambientParticles = [];
+  for (let i = 0; i < 50; i++) {
+    game.ambientParticles.push(makeAmbientParticle(true));
+  }
+}
+
+function makeAmbientParticle(randomY = false) {
+  return {
+    x: random(width),
+    y: randomY ? random(height) : height + random(10, 160),
+    vx: random(-0.2, 0.2),
+    vy: random(-0.6, -0.1),
+    size: random(1, 3),
+    alpha: random(15, 50)
+  };
+}
+
+function drawAmbientParticles() {
+  noStroke();
+  for (const p of game.ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.y < -8) Object.assign(p, makeAmbientParticle(false));
+    if (p.x < -8) p.x = width + 8;
+    if (p.x > width + 8) p.x = -8;
+    fill(255, p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function triggerShake(intensity, duration) {
+  game.effects.shake.active = true;
+  game.effects.shake.intensity = intensity;
+  game.effects.shake.duration = duration;
+  game.effects.shake.startMs = millis();
+}
+
+function applyScreenShake() {
+  const s = game.effects.shake;
+  if (!s.active) return;
+  const elapsed = millis() - s.startMs;
+  if (elapsed >= s.duration) {
+    s.active = false;
+    return;
+  }
+  const decay = 1 - elapsed / s.duration;
+  translate(random(-1, 1) * s.intensity * decay, random(-1, 1) * s.intensity * decay);
+}
+
+function triggerFlash(color, duration, alpha = 120) {
+  game.effects.flash.active = true;
+  game.effects.flash.color = [...color];
+  game.effects.flash.duration = duration;
+  game.effects.flash.startMs = millis();
+  game.effects.flash.alpha = alpha;
+}
+
+function drawScreenFlash() {
+  const f = game.effects.flash;
+  if (!f.active) return;
+  const elapsed = millis() - f.startMs;
+  if (elapsed >= f.duration) {
+    f.active = false;
+    return;
+  }
+  const a = map(elapsed, 0, f.duration, f.alpha, 0);
+  noStroke();
+  fill(f.color[0], f.color[1], f.color[2], a);
+  rect(0, 0, width, height);
+}
+
+function emitParticles(x, y, color, count = 12, maxSpeed = 5) {
+  for (let i = 0; i < count; i++) {
+    const ang = random(TWO_PI);
+    const spd = random(0.6, maxSpeed);
+    game.effects.burstParticles.push({
+      x,
+      y,
+      vx: cos(ang) * spd,
+      vy: sin(ang) * spd,
+      size: random(3, 8),
+      alpha: 255,
+      decay: random(4, 8),
+      color: [...color]
+    });
+  }
+}
+
+function drawBurstParticles() {
+  for (let i = game.effects.burstParticles.length - 1; i >= 0; i--) {
+    const p = game.effects.burstParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.99;
+    p.vy += 0.06;
+    p.alpha -= p.decay;
+    p.size *= 0.986;
+    if (p.alpha <= 0 || p.size <= 0.7) {
+      game.effects.burstParticles.splice(i, 1);
+      continue;
+    }
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function addFloatingText(x, y, txt, color = [255, 255, 255]) {
+  game.effects.floatingScores.push({
+    x,
+    y,
+    vy: -1.7,
+    alpha: 255,
+    life: 50,
+    maxLife: 50,
+    text: txt,
+    color
+  });
+}
+
+function drawFloatingScores() {
+  for (let i = game.effects.floatingScores.length - 1; i >= 0; i--) {
+    const f = game.effects.floatingScores[i];
+    f.y += f.vy;
+    f.vy *= 0.94;
+    f.life -= 1;
+    f.alpha = map(f.life, 0, f.maxLife, 0, 255);
+    if (f.life <= 0) {
+      game.effects.floatingScores.splice(i, 1);
+      continue;
+    }
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(24);
+    text(f.text, f.x, f.y);
+  }
+}
+
+function updateEffects() {}
+
+function drawConnectionIndicator() {
+  noStroke();
+  if (game.ws.connected) fill(34, 197, 94, 240);
+  else fill(239, 68, 68, 240);
+  circle(16, 16, 8);
+}
+
+function drawDemoBadge() {
+  if (!game.demo.enabled) return;
+  const w = 62;
+  const h = 24;
+  noStroke();
+  fill(245, 158, 11, 220);
+  rect(width - w - 12, 12, w, h, 6);
+  fill(20, 14, 8, 240);
+  textAlign(CENTER, CENTER);
+  textStyle(800);
+  textSize(12);
+  text("DEMO", width - w * 0.5 - 12, 24);
+}
+
+function withRuntimeQuery(path) {
+  return runtimeQueryString ? `${path}${runtimeQueryString}` : path;
+}
+
+function applyURLOverrides() {
+  const params = new URLSearchParams(window.location.search);
+  runtimeQueryString = window.location.search || "";
+
+  const wsParam = params.get("ws");
+  if (wsParam) CONFIG.WS_URL = wsParam;
+
+  const tag1 = Number(params.get("tag1"));
+  if (Number.isFinite(tag1)) {
+    CONFIG.PLAYER_TAGS.p1 = tag1;
+    game.players.p1.tagId = tag1;
+  }
+  const tag2 = Number(params.get("tag2"));
+  if (Number.isFinite(tag2)) {
+    CONFIG.PLAYER_TAGS.p2 = tag2;
+    game.players.p2.tagId = tag2;
+  }
+}
+
+function connectWebSocket() {
+  if (game.ws.socket) {
+    try { game.ws.socket.close(); } catch (_) {}
+  }
+  const ws = new WebSocket(CONFIG.WS_URL);
+  game.ws.socket = ws;
+
+  ws.onopen = () => {
+    game.ws.connected = true;
+  };
+
+  ws.onmessage = (evt) => {
+    game.ws.packetCount++;
+    let payload = null;
+    try {
+      payload = JSON.parse(evt.data);
+    } catch (_) {
+      game.ws.parseErrors++;
+      return;
+    }
+    ingestTagPayload(payload);
+  };
+
+  ws.onerror = () => {
+    game.ws.connected = false;
+  };
+
+  ws.onclose = () => {
+    game.ws.connected = false;
+    if (game.ws.reconnectTimer) clearTimeout(game.ws.reconnectTimer);
+    game.ws.reconnectTimer = setTimeout(connectWebSocket, 1000);
+  };
+}
+
+function ingestTagPayload(payload) {
+  const tags = normalizeTags(payload);
+  if (!tags.length) return;
+
+  game.ws.lastDataMs = millis();
+  for (const t of tags) {
+    const tid = Number(t.id ?? t.tagId ?? t.tag_id);
+    const tx = Number(t.x ?? t.posX ?? t.pos_x);
+    const ty = Number(t.y ?? t.posY ?? t.pos_y);
+    if (!Number.isFinite(tid) || !Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+
+    game.ws.lastTag = { id: tid, x: tx, y: ty, ms: millis() };
+
+    if (tid === game.players.p1.tagId) {
+      updatePlayerFromUWB(game.players.p1, tx, ty);
+    } else if (tid === game.players.p2.tagId) {
+      updatePlayerFromUWB(game.players.p2, tx, ty);
+    }
+  }
+}
+
+function normalizeTags(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.tags)) return payload.tags;
+  if (payload && payload.tag) return [payload.tag];
+  if (payload && (payload.id !== undefined || payload.tagId !== undefined || payload.tag_id !== undefined)) return [payload];
+  return [];
+}
+
+function updatePlayerFromUWB(player, uwbX, uwbY) {
+  const mapped = mapUWBToScreen(uwbX, uwbY, player.tagId);
+  ensurePlayerFilters(player);
+  const ts = millis() * 0.001;
+
+  player.screenX = player.filters.x.filter(mapped.x, ts);
+  player.screenY = player.filters.y.filter(mapped.y, ts);
+  player.rawX = uwbX;
+  player.rawY = uwbY;
+  player.active = true;
+  player.lastUpdateMs = millis();
+}
+
+function mapUWBToScreen(x, y, tagId = CONFIG.PLAYER_TAGS.p1) {
+  const shared = readSharedCalibrationBounds(tagId);
+  const b = shared || CONFIG.UWB_BOUNDS;
+  const pad = shared ? 0 : CONFIG.WORLD_PADDING;
+  const px = map(x, b.xMin, b.xMax, pad, width - pad);
+  const py = map(y, b.yMin, b.yMax, height - pad, pad);
+  return {
+    x: constrain(px, 0, width),
+    y: constrain(py, 0, height)
+  };
+}
+
+function updateDemoMode() {
+  const noData = millis() - game.ws.lastDataMs > CONFIG.DEMO_TIMEOUT_MS;
+  game.demo.enabled = game.demo.forced || !game.ws.connected || noData;
+  if (!game.demo.enabled) return;
+
+  const p1 = game.players.p1;
+  ensurePlayerFilters(p1);
+  const noiseX = random(-3, 3);
+  const noiseY = random(-3, 3);
+  const mx = constrain(mouseX + noiseX, 0, width);
+  const my = constrain(mouseY + noiseY, 0, height);
+  const ts = millis() * 0.001;
+  p1.screenX = p1.filters.x.filter(mx, ts);
+  p1.screenY = p1.filters.y.filter(my, ts);
+  p1.active = true;
+  p1.lastUpdateMs = millis();
+}
+
+function pruneStalePlayers() {
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active) continue;
+    if (game.demo.enabled && key === "p1") continue;
+    if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) {
+      p.active = false;
+    }
+  }
+}
+
+function keyPressed() {
+  if (key === "d" || key === "D") {
+    game.demo.forced = !game.demo.forced;
+  }
+}
+
+function renderGameToText() {
+  const rects = computeCardLayout();
+  return JSON.stringify({
+    coordinate_system: "origin=(top-left), +x right, +y down, pixels",
+    page: "game_menu",
+    websocket_connected: game.ws.connected,
+    demo_enabled: game.demo.enabled,
+    hover_card: game.cards.hoverIndex >= 0 ? CARDS[game.cards.hoverIndex].name : null,
+    cards: CARDS.map((c, i) => ({ name: c.name, file: c.file, x: floor(rects[i].x), y: floor(rects[i].y), w: floor(rects[i].w), h: floor(rects[i].h) })),
+    players: getActivePlayers().map((p) => ({ label: p.label, x: round(p.screenX), y: round(p.screenY) }))
+  });
+}
+
+function exposeAutomationHooks() {
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms = 16) => new Promise((resolve) => setTimeout(resolve, max(0, ms)));
+}
+
+class LowPassFilter {
+  constructor(alpha, initVal = 0) {
+    this.y = initVal;
+    this.s = initVal;
+    this.initialized = false;
+    this.setAlpha(alpha);
+  }
+
+  setAlpha(alpha) {
+    this.alpha = alpha;
+  }
+
+  filter(value) {
+    let result;
+    if (this.initialized) {
+      result = this.alpha * value + (1 - this.alpha) * this.s;
+    } else {
+      result = value;
+      this.initialized = true;
+    }
+    this.y = value;
+    this.s = result;
+    return result;
+  }
+
+  hasLastRawValue() {
+    return this.initialized;
+  }
+
+  lastRawValue() {
+    return this.y;
+  }
+
+  reset(value = 0) {
+    this.y = value;
+    this.s = value;
+    this.initialized = false;
+  }
+}
+
+class OneEuroFilter {
+  constructor(freq, minCutoff = 1.0, beta = 0.0, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.x = new LowPassFilter(this.alpha(minCutoff));
+    this.dx = new LowPassFilter(this.alpha(dCutoff));
+    this.lastTime = null;
+  }
+
+  alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+
+  filter(value, timestamp = null) {
+    if (this.lastTime !== null && timestamp !== null) {
+      const dt = timestamp - this.lastTime;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+
+    const dValue = this.x.hasLastRawValue() ? (value - this.x.lastRawValue()) * this.freq : 0.0;
+    const edValue = this.dx.filter(dValue);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue);
+    this.x.setAlpha(this.alpha(cutoff));
+    return this.x.filter(value);
+  }
+
+  reset(value = 0) {
+    this.x.reset(value);
+    this.dx.reset(0);
+    this.lastTime = null;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1659 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UWB WarioWare</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800;900&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: rgb(10, 10, 15);
+      font-family: "Outfit", sans-serif;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script>
+const CONFIG = {
+  WS_URL: "ws://localhost:8765",
+  UWB_BOUNDS: { xMin: 0, xMax: 4, yMin: 0, yMax: 3 },
+  PLAYER_TAGS: { p1: 1, p2: 2 },
+  CURSOR: {
+    size: 24,
+    trailLength: 12,
+    p1Color: [0, 210, 255],
+    p2Color: [255, 50, 200]
+  },
+  DEMO_TIMEOUT_MS: 3000,
+  WORLD_PADDING: 100,
+  PLAYER_ACTIVE_TIMEOUT_MS: 1200,
+  FILTER: {
+    minCutoff: 1.0,
+    beta: 0.007,
+    dCutoff: 1.0,
+    freq: 20
+  }
+};
+
+const game = {
+  state: "title",
+  phase: "title",
+  players: {
+    p1: createPlayer(CONFIG.PLAYER_TAGS.p1, "P1", CONFIG.CURSOR.p1Color),
+    p2: createPlayer(CONFIG.PLAYER_TAGS.p2, "P2", CONFIG.CURSOR.p2Color)
+  },
+  ws: {
+    socket: null,
+    connected: false,
+    reconnectTimer: null,
+    lastDataMs: 0,
+    packetCount: 0,
+    parseErrors: 0,
+    lastTag: null
+  },
+  demo: {
+    enabled: true,
+    forced: false
+  },
+  ambientParticles: [],
+  effects: {
+    flash: { active: false, startMs: 0, duration: 0, color: [255, 255, 255], alpha: 0 },
+    shake: { active: false, startMs: 0, duration: 0, intensity: 0 },
+    burstParticles: [],
+    floatingScores: []
+  },
+  input: {
+    prevMouseDown: false,
+    backHoverMs: 0
+  },
+  stats: {
+    lives: 4,
+    score: 0,
+    displayedScore: 0,
+    completed: 0,
+    won: 0,
+    bestSpeed: 1,
+    streak: 0,
+    bestStreak: 0,
+    highScore: 0
+  },
+  micro: {
+    all: [],
+    order: [],
+    lastIdx: -1,
+    currentIdx: -1,
+    data: {},
+    command: "",
+    commandAnimStart: 0,
+    instructionStart: 0,
+    playStart: 0,
+    resultStart: 0,
+    resultWon: false,
+    speedUpUntil: 0,
+    pointerPrev: null,
+    pointerSmooth: null,
+    justLeveled: false
+  },
+  navigateTo: ""
+};
+let runtimeQueryString = "";
+const SHARED_CALIBRATION_KEY = "uwb_room_calibration_v1";
+
+function isValidBounds(bounds) {
+  if (!bounds) return false;
+  const xMin = Number(bounds.xMin);
+  const xMax = Number(bounds.xMax);
+  const yMin = Number(bounds.yMin);
+  const yMax = Number(bounds.yMax);
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax) && xMax > xMin && yMax > yMin;
+}
+
+function readSharedCalibrationBounds(tagId = CONFIG.PLAYER_TAGS.p1) {
+  try {
+    const raw = localStorage.getItem(SHARED_CALIBRATION_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    const byTag = payload && payload.tags ? payload.tags[String(tagId)] : null;
+    if (isValidBounds(byTag)) return byTag;
+    if (isValidBounds(payload && payload.global)) return payload.global;
+  } catch (err) {}
+  return null;
+}
+
+function resolveUwbBoundsForTag(tagId = CONFIG.PLAYER_TAGS.p1) {
+  return readSharedCalibrationBounds(tagId) || CONFIG.UWB_BOUNDS;
+}
+
+function createPlayer(tagId, label, color) {
+  return {
+    tagId,
+    label,
+    color,
+    active: false,
+    screenX: null,
+    screenY: null,
+    rawX: null,
+    rawY: null,
+    lastUpdateMs: 0,
+    trail: [],
+    filters: null
+  };
+}
+
+function ensurePlayerFilters(player) {
+  if (player.filters) return;
+  player.filters = {
+    x: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff),
+    y: new OneEuroFilter(CONFIG.FILTER.freq, CONFIG.FILTER.minCutoff, CONFIG.FILTER.beta, CONFIG.FILTER.dCutoff)
+  };
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  textFont("Outfit");
+  applyURLOverrides();
+  initializeAmbientParticles();
+  buildMicrogames();
+  connectWebSocket();
+  exposeAutomationHooks();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  initializeAmbientParticles();
+}
+
+function draw() {
+  updateDemoMode();
+  pruneStalePlayers();
+  updatePlayerTrails();
+  updateEffects();
+
+  drawBackground();
+  drawAmbientParticles();
+
+  push();
+  applyScreenShake();
+  drawFrame();
+  updateFlow();
+  drawMicrogameLayer();
+  drawBurstParticles();
+  drawFloatingScores();
+  drawCursors();
+  pop();
+
+  drawHUD();
+  drawConnectionIndicator();
+  drawDemoBadge();
+  drawScreenFlash();
+  drawBackButton();
+
+  if (game.navigateTo) {
+    const url = game.navigateTo;
+    game.navigateTo = "";
+    window.location.href = url;
+  }
+
+  game.input.prevMouseDown = mouseIsPressed;
+}
+
+function speedLevel() {
+  return constrain(1 + floor(game.stats.completed / 4), 1, 8);
+}
+
+function isUwbControlActive() {
+  const p = game.players.p1;
+  return !game.demo.enabled && p.active && p.screenX !== null && p.screenY !== null;
+}
+
+function effectiveSpeedLevel() {
+  const s = speedLevel();
+  return isUwbControlActive() ? max(1, s - 1) : s;
+}
+
+function uwbHitPad() {
+  return isUwbControlActive() ? 6 : 0;
+}
+
+function microDurationMs() {
+  const s = effectiveSpeedLevel();
+  const base = max(1700, 4000 - (s - 1) * 280);
+  return base * (isUwbControlActive() ? 1.14 : 1);
+}
+
+function instructionDurationMs() {
+  return map(effectiveSpeedLevel(), 1, 8, 800, 400) * (isUwbControlActive() ? 1.12 : 1);
+}
+
+function resultDurationMs() {
+  return map(effectiveSpeedLevel(), 1, 8, 300, 150) * (isUwbControlActive() ? 1.08 : 1);
+}
+
+function resetRun() {
+  game.stats.lives = 4;
+  game.stats.score = 0;
+  game.stats.displayedScore = 0;
+  game.stats.completed = 0;
+  game.stats.won = 0;
+  game.stats.bestSpeed = 1;
+  game.stats.streak = 0;
+  game.stats.bestStreak = 0;
+  game.micro.order = [];
+  game.micro.lastIdx = -1;
+  game.micro.currentIdx = -1;
+  game.micro.data = {};
+  game.micro.command = "";
+  game.micro.pointerPrev = null;
+  game.micro.pointerSmooth = null;
+  game.phase = "instruction";
+  startNextMicrogame();
+}
+
+function updateFlow() {
+  if (game.state === "title") {
+    drawTitleScreen();
+    return;
+  }
+  if (game.state === "gameover") {
+    drawGameOverScreen();
+    return;
+  }
+
+  const now = millis();
+  const mg = currentMicrogame();
+  const players = getActivePlayers();
+
+  if (game.phase === "instruction") {
+    if (now - game.micro.instructionStart >= instructionDurationMs()) {
+      game.phase = "play";
+      game.micro.playStart = now;
+    }
+    return;
+  }
+
+  if (game.phase === "play") {
+    if (mg) {
+      const remain = max(0, microDurationMs() - (now - game.micro.playStart));
+      const out = mg.update(players, effectiveSpeedLevel(), remain);
+      if (out && out.done) {
+        resolveMicrogame(out.won);
+        return;
+      }
+      if (remain <= 0) {
+        let won = false;
+        if (typeof mg.onTimeout === "function") {
+          won = !!mg.onTimeout(effectiveSpeedLevel());
+        }
+        resolveMicrogame(won);
+      }
+    }
+    return;
+  }
+
+  if (game.phase === "result") {
+    if (now - game.micro.resultStart >= resultDurationMs()) {
+      if (game.stats.lives <= 0) {
+        game.state = "gameover";
+        game.stats.highScore = max(game.stats.highScore, floor(game.stats.score));
+      } else {
+        startNextMicrogame();
+      }
+    }
+  }
+}
+
+function resolveMicrogame(won) {
+  const prevSpeed = speedLevel();
+  game.micro.resultWon = won;
+  game.phase = "result";
+  game.micro.resultStart = millis();
+
+  if (won) {
+    const pts = 100 + (speedLevel() - 1) * 50;
+    game.stats.score += pts;
+    game.stats.won++;
+    game.stats.streak++;
+    game.stats.bestStreak = max(game.stats.bestStreak, game.stats.streak);
+    addFloatingText(width * 0.5, height * 0.5, `+${pts}`, [120, 255, 160]);
+    triggerFlash([34, 197, 94], 140, 70);
+  } else {
+    game.stats.lives--;
+    game.stats.streak = 0;
+    triggerFlash([239, 68, 68], 180, 100);
+    triggerShake(6, 180);
+  }
+
+  game.stats.completed++;
+  const nextSpeed = speedLevel();
+  if (nextSpeed > prevSpeed) {
+    game.micro.speedUpUntil = millis() + 500;
+    game.stats.bestSpeed = max(game.stats.bestSpeed, nextSpeed);
+    triggerShake(8, 220);
+    triggerFlash([255, 210, 80], 210, 90);
+  }
+}
+
+function startNextMicrogame() {
+  if (game.micro.order.length === 0) {
+    game.micro.order = shuffle([...Array(game.micro.all.length).keys()]);
+    if (game.micro.order[0] === game.micro.lastIdx && game.micro.order.length > 1) {
+      const temp = game.micro.order[0];
+      game.micro.order[0] = game.micro.order[1];
+      game.micro.order[1] = temp;
+    }
+  }
+
+  const idx = game.micro.order.shift();
+  game.micro.currentIdx = idx;
+  game.micro.lastIdx = idx;
+  game.micro.data = {};
+  game.micro.command = currentMicrogame().command;
+  game.micro.commandAnimStart = millis();
+  game.micro.instructionStart = millis();
+  game.phase = "instruction";
+  game.micro.pointerPrev = getPointerPoint();
+
+  currentMicrogame().setup(effectiveSpeedLevel());
+}
+
+function currentMicrogame() {
+  return game.micro.all[game.micro.currentIdx] || null;
+}
+
+function drawMicrogameLayer() {
+  if (game.state === "title" || game.state === "gameover") return;
+
+  const mg = currentMicrogame();
+  if (!mg) return;
+
+  if (game.phase === "instruction") {
+    drawInstructionOverlay(mg.command);
+    return;
+  }
+
+  mg.draw();
+
+  if (game.phase === "result") {
+    drawResultOverlay();
+  }
+
+  if (game.micro.speedUpUntil > millis()) {
+    textAlign(CENTER, CENTER);
+    textStyle(900);
+    textSize(58);
+    fill(255, 214, 92, 235);
+    text("SPEED UP!", width * 0.5, height * 0.18);
+  }
+}
+
+function drawInstructionOverlay(command) {
+  const t = constrain((millis() - game.micro.commandAnimStart) / 220, 0, 1);
+  const size = lerp(120, 72, t);
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(size);
+  fill(255, 240);
+  text(command, width * 0.5, height * 0.48);
+}
+
+function drawResultOverlay() {
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(68);
+  const won = game.micro.resultWon;
+  fill(won ? color(34, 197, 94, 225) : color(239, 68, 68, 235));
+  text(won ? "WIN!" : "LOSE!", width * 0.5, height * 0.45);
+}
+
+function drawFrame() {
+  colorMode(HSB, 360, 100, 100, 255);
+  const hue = (millis() * 0.03) % 360;
+  noFill();
+  stroke(hue, 80, 100, 220);
+  strokeWeight(20);
+  rect(18, 18, width - 36, height - 36, 22);
+  colorMode(RGB, 255, 255, 255, 255);
+}
+
+function drawHUD() {
+  if (game.state === "title") return;
+
+  game.stats.displayedScore = lerp(game.stats.displayedScore, game.stats.score, 0.13);
+
+  drawLives(24, 24);
+
+  textAlign(CENTER, TOP);
+  textStyle(900);
+  textSize(34);
+  fill(245, 250, 255, 235);
+  text(floor(game.stats.displayedScore), width * 0.5, 14);
+
+  textAlign(RIGHT, TOP);
+  textStyle(700);
+  textSize(16);
+  fill(255, 226, 150, 220);
+  text(`SPD ${effectiveSpeedLevel()}`, width - 18, 18);
+
+  drawTimerBar();
+}
+
+function drawLives(x, y) {
+  for (let i = 0; i < 4; i++) {
+    const alive = i < game.stats.lives;
+    noStroke();
+    fill(alive ? 255 : 70, alive ? 120 : 70, alive ? 150 : 85, alive ? 235 : 120);
+    circle(x + i * 18, y, 11);
+  }
+}
+
+function drawTimerBar() {
+  if (game.phase !== "play") return;
+  const pct = constrain(1 - (millis() - game.micro.playStart) / microDurationMs(), 0, 1);
+  noStroke();
+  fill(255, 255, 255, 28);
+  rect(width * 0.5 - 220, height - 26, 440, 10, 4);
+
+  const urgent = pct < 0.2;
+  const col = urgent ? [239, 68, 68] : [120, 220, 255];
+  fill(col[0], col[1], col[2], 220);
+  rect(width * 0.5 - 220, height - 26, 440 * pct, 10, 4);
+}
+
+function drawTitleScreen() {
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(min(82, width * 0.1));
+  fill(255, 238);
+  text("WARIOWARE", width * 0.5, height * 0.24);
+
+  textStyle(500);
+  textSize(24);
+  fill(230, 240, 255, 180);
+  text("React fast. Do what it says.", width * 0.5, height * 0.35);
+
+  const words = ["POP!", "DODGE!", "TRACE!", "MATCH!", "FLEE!", "SLICE!"];
+  const word = words[floor((millis() / 260) % words.length)];
+  textStyle(900);
+  textSize(58);
+  fill(255, 210, 120, 235);
+  text(word, width * 0.5, height * 0.48);
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 100, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(28);
+  text("Press SPACE to start", width * 0.5, height * 0.62);
+}
+
+function drawGameOverScreen() {
+  noStroke();
+  fill(8, 10, 15, 180);
+  rect(0, 0, width, height);
+
+  textAlign(CENTER, CENTER);
+  textStyle(900);
+  textSize(74);
+  fill(255, 235);
+  text("GAME OVER", width * 0.5, height * 0.34);
+
+  textStyle(700);
+  textSize(30);
+  fill(255, 220, 120, 220);
+  text(`Score ${floor(game.stats.score)}`, width * 0.5, height * 0.45);
+
+  textStyle(500);
+  textSize(18);
+  fill(225, 235, 255, 180);
+  text(`Won ${game.stats.won}/${game.stats.completed}   Speed ${speedLevel()}   Best Streak ${game.stats.bestStreak}`,
+    width * 0.5, height * 0.52);
+
+  if (game.stats.highScore > 0) {
+    text(`High Score ${game.stats.highScore}`, width * 0.5, height * 0.56);
+  }
+
+  const pulse = map(sin(millis() * 0.006), -1, 1, 100, 255);
+  fill(255, pulse);
+  textStyle(800);
+  textSize(25);
+  text("Press SPACE to retry", width * 0.5, height * 0.62);
+}
+
+function drawBackButton() {
+  const rectObj = { x: 10, y: 8, w: 88, h: 24 };
+  const mouseHover = pointInRect(mouseX, mouseY, rectObj);
+  const pHover = getActivePlayers().some((p) => cursorOverlapsRect(p, rectObj));
+  const hover = mouseHover || pHover;
+
+  if (hover) {
+    if (game.input.backHoverMs === 0) game.input.backHoverMs = millis();
+    if ((mouseIsPressed && !game.input.prevMouseDown) || millis() - game.input.backHoverMs > 1000) {
+      game.navigateTo = withRuntimeQuery("game_menu.html");
+    }
+  } else {
+    game.input.backHoverMs = 0;
+  }
+
+  noStroke();
+  fill(10, 10, 15, 150);
+  rect(rectObj.x, rectObj.y, rectObj.w, rectObj.h, 6);
+  fill(255, hover ? 255 : 130);
+  textAlign(LEFT, CENTER);
+  textStyle(600);
+  textSize(14);
+  text("← MENU", rectObj.x + 10, rectObj.y + 12);
+  if (hover) {
+    stroke(255, 220);
+    line(rectObj.x + 10, rectObj.y + 18, rectObj.x + 62, rectObj.y + 18);
+  }
+}
+
+function getPointerPoint() {
+  const p = game.players.p1;
+  if (p.active && p.screenX !== null && p.screenY !== null) {
+    if (isUwbControlActive()) {
+      if (!game.micro.pointerSmooth) {
+        game.micro.pointerSmooth = { x: p.screenX, y: p.screenY };
+      } else {
+        game.micro.pointerSmooth.x = lerp(game.micro.pointerSmooth.x, p.screenX, 0.48);
+        game.micro.pointerSmooth.y = lerp(game.micro.pointerSmooth.y, p.screenY, 0.48);
+      }
+      return { x: game.micro.pointerSmooth.x, y: game.micro.pointerSmooth.y };
+    }
+    game.micro.pointerSmooth = { x: p.screenX, y: p.screenY };
+    return { x: p.screenX, y: p.screenY };
+  }
+  game.micro.pointerSmooth = null;
+  return { x: mouseX, y: mouseY };
+}
+
+function pointerHitCircle(circle, extra = 0) {
+  const pt = getPointerPoint();
+  return dist(pt.x, pt.y, circle.x, circle.y) <= circle.r + extra;
+}
+
+function pointInRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function cursorOverlapsRect(player, rectObj) {
+  if (!player.active || player.screenX === null || player.screenY === null) return false;
+  const nx = constrain(player.screenX, rectObj.x, rectObj.x + rectObj.w);
+  const ny = constrain(player.screenY, rectObj.y, rectObj.y + rectObj.h);
+  return dist(player.screenX, player.screenY, nx, ny) <= CONFIG.CURSOR.size * 0.5;
+}
+
+function keyPressed() {
+  if (key === "d" || key === "D") game.demo.forced = !game.demo.forced;
+  if (key === "Escape") game.navigateTo = withRuntimeQuery("game_menu.html");
+  if (key === " " || keyCode === 32) {
+    if (game.state === "title") {
+      game.state = "running";
+      resetRun();
+      return;
+    }
+    if (game.state === "gameover") {
+      game.state = "running";
+      resetRun();
+      return;
+    }
+  }
+}
+
+function mousePressed() {
+  if (game.state === "title") {
+    game.state = "running";
+    resetRun();
+  }
+}
+
+function drawBackground() {
+  background(10, 10, 15);
+  noStroke();
+  fill(24, 30, 52, 60);
+  circle(width * 0.2, height * 0.2, 260);
+  circle(width * 0.76, height * 0.7, 340);
+}
+
+function initializeAmbientParticles() {
+  game.ambientParticles = [];
+  for (let i = 0; i < 50; i++) game.ambientParticles.push(makeAmbientParticle(true));
+}
+
+function makeAmbientParticle(randomY = false) {
+  return {
+    x: random(width),
+    y: randomY ? random(height) : height + random(10, 160),
+    vx: random(-0.2, 0.2),
+    vy: random(-0.6, -0.1),
+    size: random(1, 3),
+    alpha: random(15, 50)
+  };
+}
+
+function drawAmbientParticles() {
+  noStroke();
+  for (const p of game.ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.y < -8) Object.assign(p, makeAmbientParticle(false));
+    if (p.x < -8) p.x = width + 8;
+    if (p.x > width + 8) p.x = -8;
+    fill(255, p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function updatePlayerTrails() {
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    p.trail.unshift({ x: p.screenX, y: p.screenY });
+    if (p.trail.length > CONFIG.CURSOR.trailLength) p.trail.length = CONFIG.CURSOR.trailLength;
+  }
+}
+
+function drawCursors() {
+  for (const p of [game.players.p1, game.players.p2]) {
+    if (!p.active || p.screenX === null || p.screenY === null) continue;
+    drawCursorTrail(p);
+    drawCursorGlow(p);
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], 220);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size);
+    fill(255, 180);
+    circle(p.screenX, p.screenY, CONFIG.CURSOR.size * 0.35);
+  }
+}
+
+function drawCursorTrail(player) {
+  const tlen = player.trail.length;
+  for (let i = tlen - 1; i >= 0; i--) {
+    const pt = player.trail[i];
+    const n = i / max(1, tlen - 1);
+    const size = lerp(4, CONFIG.CURSOR.size, 1 - n);
+    const alpha = lerp(0, 180, 1 - n) * 0.35;
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(pt.x, pt.y, size);
+  }
+}
+
+function drawCursorGlow(player) {
+  const layers = 12;
+  const maxR = CONFIG.CURSOR.size * 2.5;
+  for (let i = layers; i >= 1; i--) {
+    const r = map(i, 1, layers, CONFIG.CURSOR.size * 0.5, maxR);
+    const alpha = map(i, 1, layers, 30, 0);
+    noStroke();
+    fill(player.color[0], player.color[1], player.color[2], alpha);
+    circle(player.screenX, player.screenY, r);
+  }
+}
+
+function getActivePlayers() {
+  const out = [];
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (p.active && p.screenX !== null && p.screenY !== null) out.push(p);
+  }
+  return out;
+}
+
+function triggerShake(intensity, duration) {
+  game.effects.shake.active = true;
+  game.effects.shake.intensity = intensity;
+  game.effects.shake.duration = duration;
+  game.effects.shake.startMs = millis();
+}
+
+function applyScreenShake() {
+  const s = game.effects.shake;
+  if (!s.active) return;
+  const elapsed = millis() - s.startMs;
+  if (elapsed >= s.duration) {
+    s.active = false;
+    return;
+  }
+  const decay = 1 - elapsed / s.duration;
+  translate(random(-1, 1) * s.intensity * decay, random(-1, 1) * s.intensity * decay);
+}
+
+function triggerFlash(color, duration, alpha = 120) {
+  game.effects.flash.active = true;
+  game.effects.flash.color = [...color];
+  game.effects.flash.duration = duration;
+  game.effects.flash.startMs = millis();
+  game.effects.flash.alpha = alpha;
+}
+
+function drawScreenFlash() {
+  const f = game.effects.flash;
+  if (!f.active) return;
+  const elapsed = millis() - f.startMs;
+  if (elapsed >= f.duration) {
+    f.active = false;
+    return;
+  }
+  const a = map(elapsed, 0, f.duration, f.alpha, 0);
+  noStroke();
+  fill(f.color[0], f.color[1], f.color[2], a);
+  rect(0, 0, width, height);
+}
+
+function emitParticles(x, y, color, count = 12, maxSpeed = 5) {
+  for (let i = 0; i < count; i++) {
+    const ang = random(TWO_PI);
+    const spd = random(0.6, maxSpeed);
+    game.effects.burstParticles.push({
+      x,
+      y,
+      vx: cos(ang) * spd,
+      vy: sin(ang) * spd,
+      size: random(3, 8),
+      alpha: 255,
+      decay: random(4, 8),
+      color: [...color]
+    });
+  }
+}
+
+function drawBurstParticles() {
+  for (let i = game.effects.burstParticles.length - 1; i >= 0; i--) {
+    const p = game.effects.burstParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.99;
+    p.vy += 0.06;
+    p.alpha -= p.decay;
+    p.size *= 0.986;
+    if (p.alpha <= 0 || p.size <= 0.7) {
+      game.effects.burstParticles.splice(i, 1);
+      continue;
+    }
+    noStroke();
+    fill(p.color[0], p.color[1], p.color[2], p.alpha);
+    circle(p.x, p.y, p.size);
+  }
+}
+
+function addFloatingText(x, y, txt, color = [255, 255, 255]) {
+  game.effects.floatingScores.push({
+    x,
+    y,
+    vy: -1.7,
+    alpha: 255,
+    life: 50,
+    maxLife: 50,
+    text: txt,
+    color
+  });
+}
+
+function drawFloatingScores() {
+  for (let i = game.effects.floatingScores.length - 1; i >= 0; i--) {
+    const f = game.effects.floatingScores[i];
+    f.y += f.vy;
+    f.vy *= 0.94;
+    f.life -= 1;
+    f.alpha = map(f.life, 0, f.maxLife, 0, 255);
+    if (f.life <= 0) {
+      game.effects.floatingScores.splice(i, 1);
+      continue;
+    }
+    fill(f.color[0], f.color[1], f.color[2], f.alpha);
+    textAlign(CENTER, CENTER);
+    textStyle(800);
+    textSize(24);
+    text(f.text, f.x, f.y);
+  }
+}
+
+function updateEffects() {}
+
+function drawConnectionIndicator() {
+  noStroke();
+  fill(game.ws.connected ? color(34, 197, 94, 240) : color(239, 68, 68, 240));
+  circle(16, 16, 8);
+}
+
+function drawDemoBadge() {
+  if (!game.demo.enabled) return;
+  const w = 62;
+  const h = 24;
+  noStroke();
+  fill(245, 158, 11, 220);
+  rect(width - w - 12, 12, w, h, 6);
+  fill(20, 14, 8, 240);
+  textAlign(CENTER, CENTER);
+  textStyle(800);
+  textSize(12);
+  text("DEMO", width - w * 0.5 - 12, 24);
+}
+
+function withRuntimeQuery(path) {
+  return runtimeQueryString ? `${path}${runtimeQueryString}` : path;
+}
+
+function applyURLOverrides() {
+  const params = new URLSearchParams(window.location.search);
+  runtimeQueryString = window.location.search || "";
+
+  const wsParam = params.get("ws");
+  if (wsParam) CONFIG.WS_URL = wsParam;
+
+  const tag1 = Number(params.get("tag1"));
+  if (Number.isFinite(tag1)) {
+    CONFIG.PLAYER_TAGS.p1 = tag1;
+    game.players.p1.tagId = tag1;
+  }
+  const tag2 = Number(params.get("tag2"));
+  if (Number.isFinite(tag2)) {
+    CONFIG.PLAYER_TAGS.p2 = tag2;
+    game.players.p2.tagId = tag2;
+  }
+}
+
+function connectWebSocket() {
+  if (game.ws.socket) {
+    try { game.ws.socket.close(); } catch (_) {}
+  }
+  const ws = new WebSocket(CONFIG.WS_URL);
+  game.ws.socket = ws;
+  ws.onopen = () => { game.ws.connected = true; };
+  ws.onmessage = (evt) => {
+    game.ws.packetCount++;
+    let payload;
+    try {
+      payload = JSON.parse(evt.data);
+    } catch (_) {
+      game.ws.parseErrors++;
+      return;
+    }
+    ingestTagPayload(payload);
+  };
+  ws.onerror = () => { game.ws.connected = false; };
+  ws.onclose = () => {
+    game.ws.connected = false;
+    if (game.ws.reconnectTimer) clearTimeout(game.ws.reconnectTimer);
+    game.ws.reconnectTimer = setTimeout(connectWebSocket, 1000);
+  };
+}
+
+function ingestTagPayload(payload) {
+  const tags = normalizeTags(payload);
+  if (!tags.length) return;
+
+  game.ws.lastDataMs = millis();
+  for (const t of tags) {
+    const tid = Number(t.id ?? t.tagId ?? t.tag_id);
+    const tx = Number(t.x ?? t.posX ?? t.pos_x);
+    const ty = Number(t.y ?? t.posY ?? t.pos_y);
+    if (!Number.isFinite(tid) || !Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+    game.ws.lastTag = { id: tid, x: tx, y: ty, ms: millis() };
+    if (tid === game.players.p1.tagId) updatePlayerFromUWB(game.players.p1, tx, ty);
+    else if (tid === game.players.p2.tagId) updatePlayerFromUWB(game.players.p2, tx, ty);
+  }
+}
+
+function normalizeTags(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.tags)) return payload.tags;
+  if (payload && payload.tag) return [payload.tag];
+  if (payload && (payload.id !== undefined || payload.tagId !== undefined || payload.tag_id !== undefined)) return [payload];
+  return [];
+}
+
+function mapUWBToScreen(x, y, tagId = CONFIG.PLAYER_TAGS.p1) {
+  const shared = readSharedCalibrationBounds(tagId);
+  const b = shared || CONFIG.UWB_BOUNDS;
+  const pad = shared ? 0 : CONFIG.WORLD_PADDING;
+  const px = map(x, b.xMin, b.xMax, pad, width - pad);
+  const py = map(y, b.yMin, b.yMax, height - pad, pad);
+  return { x: constrain(px, 0, width), y: constrain(py, 0, height) };
+}
+
+function updatePlayerFromUWB(player, uwbX, uwbY) {
+  ensurePlayerFilters(player);
+  const mapped = mapUWBToScreen(uwbX, uwbY, player.tagId);
+  const ts = millis() * 0.001;
+  player.screenX = player.filters.x.filter(mapped.x, ts);
+  player.screenY = player.filters.y.filter(mapped.y, ts);
+  player.rawX = uwbX;
+  player.rawY = uwbY;
+  player.active = true;
+  player.lastUpdateMs = millis();
+}
+
+function updateDemoMode() {
+  const noData = millis() - game.ws.lastDataMs > CONFIG.DEMO_TIMEOUT_MS;
+  game.demo.enabled = game.demo.forced || !game.ws.connected || noData;
+  if (!game.demo.enabled) return;
+
+  const p1 = game.players.p1;
+  ensurePlayerFilters(p1);
+  const ts = millis() * 0.001;
+  const mx = constrain(mouseX + random(-3, 3), 0, width);
+  const my = constrain(mouseY + random(-3, 3), 0, height);
+  p1.screenX = p1.filters.x.filter(mx, ts);
+  p1.screenY = p1.filters.y.filter(my, ts);
+  p1.active = true;
+  p1.lastUpdateMs = millis();
+}
+
+function pruneStalePlayers() {
+  const now = millis();
+  for (const key of ["p1", "p2"]) {
+    const p = game.players[key];
+    if (!p.active) continue;
+    if (game.demo.enabled && key === "p1") continue;
+    if (now - p.lastUpdateMs > CONFIG.PLAYER_ACTIVE_TIMEOUT_MS) p.active = false;
+  }
+}
+
+function renderGameToText() {
+  return JSON.stringify({
+    coordinate_system: "origin=(top-left), +x right, +y down, pixels",
+    page: "warioware",
+    state: game.state,
+    phase: game.phase,
+    score: floor(game.stats.score),
+    lives: game.stats.lives,
+    speed_level: effectiveSpeedLevel(),
+    command: game.micro.command,
+    microgame: currentMicrogame() ? currentMicrogame().name : null,
+    websocket_connected: game.ws.connected,
+    demo_enabled: game.demo.enabled,
+    players: getActivePlayers().map((p) => ({ label: p.label, x: round(p.screenX), y: round(p.screenY) }))
+  });
+}
+
+function exposeAutomationHooks() {
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms = 16) => new Promise((resolve) => setTimeout(resolve, max(0, ms)));
+}
+
+function buildMicrogames() {
+  game.micro.all = [
+    makePopMicrogame(),
+    makeDodgeMicrogame(),
+    makeCatchMicrogame(),
+    makeFreezeMicrogame(),
+    makeBiggerMicrogame(),
+    makeTraceMicrogame(),
+    makeShakeMicrogame(),
+    makeAvoidMicrogame(),
+    makeGatherMicrogame(),
+    makeMatchMicrogame(),
+    makeFleeMicrogame(),
+    makeSliceMicrogame()
+  ];
+}
+
+function makePopMicrogame() {
+  return {
+    name: "POP",
+    command: "POP!",
+    setup(speed) {
+      const n = 5 + floor(speed * 0.5);
+      game.micro.data = {
+        bubbles: Array.from({ length: n }).map(() => ({
+          x: random(120, width - 120),
+          y: random(120, height - 120),
+          r: random(18, 28) - speed * 0.7,
+          vx: random(-1.8, 1.8) * (1 + speed * 0.05),
+          vy: random(-1.6, 1.6) * (1 + speed * 0.05)
+        }))
+      };
+    },
+    update(players) {
+      const d = game.micro.data;
+      for (const b of d.bubbles) {
+        b.x += b.vx;
+        b.y += b.vy;
+        if (b.x < b.r || b.x > width - b.r) b.vx *= -1;
+        if (b.y < b.r || b.y > height - b.r) b.vy *= -1;
+      }
+      for (let i = d.bubbles.length - 1; i >= 0; i--) {
+        for (const p of players) {
+          if (dist(p.screenX, p.screenY, d.bubbles[i].x, d.bubbles[i].y) < d.bubbles[i].r + 12 + uwbHitPad()) {
+            emitParticles(d.bubbles[i].x, d.bubbles[i].y, [150, 220, 255], 8, 3.8);
+            d.bubbles.splice(i, 1);
+            break;
+          }
+        }
+      }
+      if (d.bubbles.length === 0) return { done: true, won: true };
+      return null;
+    },
+    onTimeout() { return false; },
+    draw() {
+      const d = game.micro.data;
+      for (const b of d.bubbles) {
+        noStroke();
+        fill(160, 220, 255, 65);
+        circle(b.x, b.y, b.r * 2.2);
+        stroke(190, 236, 255, 230);
+        strokeWeight(2);
+        noFill();
+        circle(b.x, b.y, b.r * 2);
+      }
+    }
+  };
+}
+
+function makeDodgeMicrogame() {
+  return {
+    name: "DODGE",
+    command: "DODGE!",
+    setup(speed) {
+      const count = speed >= 5 ? 2 : 1;
+      game.micro.data = {
+        bars: Array.from({ length: count }).map((_, i) => ({
+          y: -80 - i * 180,
+          h: 28,
+          vy: 3 + speed * 0.65,
+          gapX: random(width * 0.25, width * 0.75),
+          gapW: max(96, 170 - speed * 10),
+          drift: random(-1.1, 1.1)
+        }))
+      };
+    },
+    update(players) {
+      const d = game.micro.data;
+      for (const bar of d.bars) {
+        bar.y += bar.vy;
+        bar.gapX += bar.drift;
+        if (bar.gapX < 90 || bar.gapX > width - 90) bar.drift *= -1;
+        bar.gapX = constrain(bar.gapX, 90, width - 90);
+        if (bar.y > height + 80) {
+          bar.y = -120;
+          bar.gapX = random(width * 0.25, width * 0.75);
+        }
+        for (const p of players) {
+          const inBand = p.screenY > bar.y - bar.h * 0.5 && p.screenY < bar.y + bar.h * 0.5;
+          const inGap = p.screenX > bar.gapX - bar.gapW * 0.5 && p.screenX < bar.gapX + bar.gapW * 0.5;
+          if (inBand && !inGap) {
+            return { done: true, won: false };
+          }
+        }
+      }
+      return null;
+    },
+    onTimeout() { return true; },
+    draw() {
+      for (const bar of game.micro.data.bars) {
+        noStroke();
+        fill(239, 68, 68, 200);
+        const gapL = bar.gapX - bar.gapW * 0.5;
+        const gapR = bar.gapX + bar.gapW * 0.5;
+        rect(80, bar.y - bar.h * 0.5, max(0, gapL - 80), bar.h, 10);
+        rect(gapR, bar.y - bar.h * 0.5, max(0, width - 80 - gapR), bar.h, 10);
+        fill(120, 255, 170, 210);
+        rect(bar.gapX - bar.gapW * 0.5, bar.y - bar.h * 0.5, bar.gapW, bar.h, 10);
+      }
+    }
+  };
+}
+
+function makeCatchMicrogame() {
+  return {
+    name: "CATCH",
+    command: "CATCH!",
+    setup(speed) {
+      const count = speed >= 3 ? 2 : 1;
+      game.micro.data = {
+        items: Array.from({ length: count }).map(() => ({
+          x: random(80, width - 80), y: -random(40, 240), vy: 2.8 + speed * 0.82, caught: false
+        }))
+      };
+    },
+    update(players) {
+      const d = game.micro.data;
+      let caught = 0;
+      for (const it of d.items) {
+        if (it.caught) { caught++; continue; }
+        it.y += it.vy;
+        if (it.y > height + 20) return { done: true, won: false };
+        for (const p of players) {
+          if (dist(p.screenX, p.screenY, it.x, it.y) < 24 + uwbHitPad()) {
+            it.caught = true;
+            emitParticles(it.x, it.y, [255, 220, 120], 10, 4);
+            caught++;
+            break;
+          }
+        }
+      }
+      if (caught >= d.items.length) return { done: true, won: true };
+      return null;
+    },
+    onTimeout() { return false; },
+    draw() {
+      for (const it of game.micro.data.items) {
+        if (it.caught) continue;
+        push();
+        translate(it.x, it.y);
+        rotate(millis() * 0.01);
+        fill(255, 210, 120, 220);
+        noStroke();
+        beginShape();
+        for (let i = 0; i < 5; i++) {
+          const a = (TWO_PI * i) / 5 - HALF_PI;
+          vertex(cos(a) * 16, sin(a) * 16);
+          const a2 = a + PI / 5;
+          vertex(cos(a2) * 7, sin(a2) * 7);
+        }
+        endShape(CLOSE);
+        pop();
+      }
+    }
+  };
+}
+
+function makeFreezeMicrogame() {
+  return {
+    name: "FREEZE",
+    command: "FREEZE!",
+    setup() {
+      const pt = getPointerPoint();
+      game.micro.data = { x: pt.x, y: pt.y, meter: 0 };
+    },
+    update() {
+      const d = game.micro.data;
+      const pt = getPointerPoint();
+      const moved = dist(pt.x, pt.y, d.x, d.y);
+      const moveThreshold = 12 + (isUwbControlActive() ? 2.5 : 0);
+      if (moved > moveThreshold) d.meter += moved * 0.65;
+      else d.meter = max(0, d.meter - 2.2);
+      d.x = pt.x;
+      d.y = pt.y;
+      if (d.meter >= 130) return { done: true, won: false };
+      return null;
+    },
+    onTimeout() { return true; },
+    draw() {
+      const d = game.micro.data;
+      noStroke();
+      fill(90, 150, 255, 45);
+      rect(0, 0, width, height);
+      fill(255, 240);
+      textAlign(CENTER, CENTER);
+      textStyle(800);
+      textSize(42);
+      text("DON'T MOVE", width * 0.5, height * 0.33);
+      fill(255, 80);
+      rect(width * 0.5 - 150, height * 0.62, 300, 16, 6);
+      fill(239, 68, 68, 210);
+      rect(width * 0.5 - 150, height * 0.62, 300 * constrain(d.meter / 100, 0, 1), 16, 6);
+    }
+  };
+}
+
+function makeBiggerMicrogame() {
+  return {
+    name: "BIGGER",
+    command: "BIGGER!",
+    setup(speed) {
+      const count = speed >= 5 ? 3 : 2;
+      const target = floor(random(count));
+      const base = random(42, 60);
+      game.micro.data = {
+        circles: Array.from({ length: count }).map((_, i) => ({
+          x: map(i + 1, 0, count + 1, 140, width - 140),
+          y: height * 0.55,
+          r: i === target ? base + 10 : base + random(-4 - speed * 0.4, 2),
+          target: i === target
+        }))
+      };
+    },
+    update(players) {
+      for (const c of game.micro.data.circles) {
+        for (const p of players) {
+          if (dist(p.screenX, p.screenY, c.x, c.y) < c.r + uwbHitPad()) {
+            return { done: true, won: c.target };
+          }
+        }
+      }
+      return null;
+    },
+    onTimeout() {
+      const pt = getPointerPoint();
+      for (const c of game.micro.data.circles) {
+        if (dist(pt.x, pt.y, c.x, c.y) < c.r + uwbHitPad() && c.target) return true;
+      }
+      return false;
+    },
+    draw() {
+      for (const c of game.micro.data.circles) {
+        stroke(255, 210);
+        strokeWeight(3);
+        noFill();
+        circle(c.x, c.y, c.r * 2);
+      }
+    }
+  };
+}
+
+function makeTraceMicrogame() {
+  return {
+    name: "TRACE",
+    command: "TRACE!",
+    setup(speed) {
+      const n = speed >= 5 ? 26 : 20;
+      const pts = [];
+      const style = random(["circle", "triangle", "square", "star"]);
+      for (let i = 0; i < n; i++) {
+        const t = i / n;
+        let x, y;
+        if (style === "circle") {
+          const a = t * TWO_PI;
+          x = width * 0.5 + cos(a) * 140;
+          y = height * 0.52 + sin(a) * 140;
+        } else if (style === "triangle") {
+          const k = floor(t * 3);
+          const tt = (t * 3) % 1;
+          const verts = [[0.5,0.2],[0.22,0.78],[0.78,0.78]];
+          const a = verts[k];
+          const b = verts[(k + 1) % 3];
+          x = lerp(a[0], b[0], tt) * width;
+          y = lerp(a[1], b[1], tt) * height;
+        } else if (style === "square") {
+          const k = floor(t * 4);
+          const tt = (t * 4) % 1;
+          const verts = [[0.3,0.3],[0.7,0.3],[0.7,0.7],[0.3,0.7]];
+          const a = verts[k];
+          const b = verts[(k + 1) % 4];
+          x = lerp(a[0], b[0], tt) * width;
+          y = lerp(a[1], b[1], tt) * height;
+        } else {
+          const a = t * TWO_PI;
+          const rr = i % 2 === 0 ? 150 : 75;
+          x = width * 0.5 + cos(a) * rr;
+          y = height * 0.52 + sin(a) * rr;
+        }
+        pts.push({ x, y, hit: false });
+      }
+      game.micro.data = { pts, hit: 0 };
+    },
+    update(players) {
+      const d = game.micro.data;
+      for (const cp of d.pts) {
+        if (cp.hit) continue;
+        for (const p of players) {
+          if (dist(p.screenX, p.screenY, cp.x, cp.y) < 18 + uwbHitPad()) {
+            cp.hit = true;
+            d.hit++;
+            break;
+          }
+        }
+      }
+      if (d.hit / d.pts.length >= 0.72) return { done: true, won: true };
+      return null;
+    },
+    onTimeout() {
+      const d = game.micro.data;
+      return d.hit / d.pts.length >= 0.72;
+    },
+    draw() {
+      const d = game.micro.data;
+      stroke(255, 70);
+      strokeWeight(2);
+      noFill();
+      beginShape();
+      for (const p of d.pts) vertex(p.x, p.y);
+      endShape(CLOSE);
+      for (const p of d.pts) {
+        noStroke();
+        fill(p.hit ? color(120, 255, 170, 220) : color(220, 230, 255, 120));
+        circle(p.x, p.y, 8);
+      }
+    }
+  };
+}
+
+function makeShakeMicrogame() {
+  return {
+    name: "SHAKE",
+    command: "SHAKE!",
+    setup(speed) {
+      game.micro.data = { fill: 0, flips: 0, need: 6 + speed * 1.8, lastDir: 0, lastX: getPointerPoint().x };
+    },
+    update() {
+      const d = game.micro.data;
+      const pt = getPointerPoint();
+      const dx = pt.x - d.lastX;
+      const dir = abs(dx) > 5 ? Math.sign(dx) : 0;
+      if (dir !== 0 && d.lastDir !== 0 && dir !== d.lastDir) {
+        d.flips++;
+        d.fill = min(100, (d.flips / d.need) * 100);
+      }
+      if (dir !== 0) d.lastDir = dir;
+      d.lastX = pt.x;
+      if (d.fill >= 100) return { done: true, won: true };
+      return null;
+    },
+    onTimeout() { return false; },
+    draw() {
+      const d = game.micro.data;
+      fill(255, 235);
+      noStroke();
+      rect(width * 0.5 - 42, height * 0.44, 84, 150, 16);
+      fill(120, 200, 255, 220);
+      rect(width * 0.5 - 34, height * 0.58 - d.fill * 1.2, 68, d.fill * 1.2, 10);
+      fill(255, 220);
+      textAlign(CENTER, CENTER);
+      textStyle(700);
+      textSize(24);
+      text(`${floor(d.fill)}%`, width * 0.5, height * 0.68);
+    }
+  };
+}
+
+function makeAvoidMicrogame() {
+  return {
+    name: "AVOID",
+    command: "AVOID!",
+    setup(speed) {
+      game.micro.data = {
+        rings: Array.from({ length: min(5, 2 + floor(speed * 0.6)) }).map(() => ({
+          x: random(140, width - 140),
+          y: random(120, height - 120),
+          r: random(20, 50),
+          vr: 1.6 + speed * 0.35
+        }))
+      };
+    },
+    update(players) {
+      for (const ring of game.micro.data.rings) {
+        ring.r += ring.vr;
+        if (ring.r > max(width, height)) ring.r = random(20, 50);
+        for (const p of players) {
+          const d = dist(p.screenX, p.screenY, ring.x, ring.y);
+          if (abs(d - ring.r) < 11 - (isUwbControlActive() ? 2 : 0)) {
+            return { done: true, won: false };
+          }
+        }
+      }
+      return null;
+    },
+    onTimeout() { return true; },
+    draw() {
+      noFill();
+      for (const ring of game.micro.data.rings) {
+        stroke(120, 210, 255, 160);
+        strokeWeight(3);
+        circle(ring.x, ring.y, ring.r * 2);
+      }
+    }
+  };
+}
+
+function makeGatherMicrogame() {
+  return {
+    name: "GATHER",
+    command: "GATHER!",
+    setup(speed) {
+      game.micro.data = {
+        center: { x: width * 0.5, y: height * 0.5, r: 74 },
+        dots: Array.from({ length: 8 + floor(speed * 0.7) }).map(() => ({
+          x: random(110, width - 110), y: random(110, height - 110), vx: random(-0.8, 0.8), vy: random(-0.8, 0.8)
+        }))
+      };
+    },
+    update() {
+      const d = game.micro.data;
+      const pt = getPointerPoint();
+      let inside = 0;
+      for (const dot of d.dots) {
+        const ax = pt.x - dot.x;
+        const ay = pt.y - dot.y;
+        const len = Math.hypot(ax, ay) || 1;
+        const w = min(0.18, 0.03 + 70 / max(70, len) * 0.05);
+        dot.vx += (ax / len) * w;
+        dot.vy += (ay / len) * w;
+
+        const cx = d.center.x - dot.x;
+        const cy = d.center.y - dot.y;
+        const clen = Math.hypot(cx, cy) || 1;
+        dot.vx += (cx / clen) * 0.012;
+        dot.vy += (cy / clen) * 0.012;
+
+        dot.vx *= 0.96;
+        dot.vy *= 0.96;
+        dot.x += dot.vx;
+        dot.y += dot.vy;
+
+        if (dist(dot.x, dot.y, d.center.x, d.center.y) < d.center.r) inside++;
+      }
+      if (inside === d.dots.length) return { done: true, won: true };
+      return null;
+    },
+    onTimeout() { return false; },
+    draw() {
+      const d = game.micro.data;
+      noFill();
+      stroke(120, 255, 180, 180);
+      strokeWeight(3);
+      circle(d.center.x, d.center.y, d.center.r * 2);
+      for (const dot of d.dots) {
+        const inC = dist(dot.x, dot.y, d.center.x, d.center.y) < d.center.r;
+        noStroke();
+        fill(inC ? color(120, 255, 150, 220) : color(220, 230, 255, 190));
+        circle(dot.x, dot.y, 8);
+      }
+    }
+  };
+}
+
+function makeMatchMicrogame() {
+  return {
+    name: "MATCH",
+    command: "MATCH!",
+    setup() {
+      const palette = [[255, 80, 120], [120, 200, 255], [120, 255, 160], [255, 210, 90]];
+      const target = floor(random(palette.length));
+      const options = shuffle([...palette]).slice(0, 3);
+      if (!options.some((c) => c[0] === palette[target][0] && c[1] === palette[target][1] && c[2] === palette[target][2])) {
+        options[floor(random(3))] = palette[target];
+      }
+      game.micro.data = {
+        target: palette[target],
+        options: options.map((c, i) => ({ color: c, x: map(i + 1, 0, 4, 150, width - 150), y: height * 0.72, r: 46 }))
+      };
+    },
+    update(players) {
+      for (const o of game.micro.data.options) {
+        for (const p of players) {
+          if (dist(p.screenX, p.screenY, o.x, o.y) < o.r + uwbHitPad()) {
+            const t = game.micro.data.target;
+            const good = o.color[0] === t[0] && o.color[1] === t[1] && o.color[2] === t[2];
+            return { done: true, won: good };
+          }
+        }
+      }
+      return null;
+    },
+    onTimeout() { return false; },
+    draw() {
+      const d = game.micro.data;
+      noStroke();
+      fill(d.target[0], d.target[1], d.target[2], 240);
+      circle(width * 0.5, height * 0.27, 110);
+      for (const o of d.options) {
+        fill(o.color[0], o.color[1], o.color[2], 225);
+        circle(o.x, o.y, o.r * 2);
+      }
+    }
+  };
+}
+
+function makeFleeMicrogame() {
+  return {
+    name: "FLEE",
+    command: "FLEE!",
+    setup(speed) {
+      const n = speed >= 7 ? 3 : speed >= 4 ? 2 : 1;
+      game.micro.data = {
+        enemies: Array.from({ length: n }).map(() => ({ x: random(width), y: random(height), vx: 0, vy: 0 }))
+      };
+    },
+    update(players) {
+      if (!players.length) return null;
+      const p = players[0];
+      for (const e of game.micro.data.enemies) {
+        const ax = p.screenX - e.x;
+        const ay = p.screenY - e.y;
+        const len = Math.hypot(ax, ay) || 1;
+        e.vx += (ax / len) * 0.25;
+        e.vy += (ay / len) * 0.25;
+        const v = Math.hypot(e.vx, e.vy);
+        const maxV = 3.2 + speedLevel() * 0.55;
+        if (v > maxV) {
+          e.vx = (e.vx / v) * maxV;
+          e.vy = (e.vy / v) * maxV;
+        }
+        e.x += e.vx;
+        e.y += e.vy;
+
+        if (dist(e.x, e.y, p.screenX, p.screenY) < 20) {
+          return { done: true, won: false };
+        }
+      }
+      return null;
+    },
+    onTimeout() { return true; },
+    draw() {
+      for (const e of game.micro.data.enemies) {
+        noStroke();
+        fill(239, 68, 68, 220);
+        circle(e.x, e.y, 36);
+        fill(20, 20, 26, 220);
+        circle(e.x - 6, e.y - 4, 5);
+        circle(e.x + 6, e.y - 4, 5);
+        stroke(20, 20, 26, 220);
+        strokeWeight(3);
+        line(e.x - 8, e.y + 6, e.x + 8, e.y + 6);
+      }
+    }
+  };
+}
+
+function makeSliceMicrogame() {
+  return {
+    name: "SLICE",
+    command: "SLICE!",
+    setup(speed) {
+      const n = 3 + floor(speed * 0.5);
+      game.micro.data = {
+        lines: Array.from({ length: n }).map(() => {
+          const x1 = random(120, width - 120);
+          const y1 = random(120, height - 120);
+          const x2 = x1 + random(-140, 140);
+          const y2 = y1 + random(-140, 140);
+          return { x1, y1, x2, y2, cut: false };
+        })
+      };
+      game.micro.pointerPrev = getPointerPoint();
+    },
+    update() {
+      const d = game.micro.data;
+      const prev = game.micro.pointerPrev || getPointerPoint();
+      const pt = getPointerPoint();
+      for (const ln of d.lines) {
+        if (ln.cut) continue;
+        if (segmentsIntersect(prev.x, prev.y, pt.x, pt.y, ln.x1, ln.y1, ln.x2, ln.y2)) {
+          ln.cut = true;
+          emitParticles((ln.x1 + ln.x2) * 0.5, (ln.y1 + ln.y2) * 0.5, [255, 200, 120], 8, 3.8);
+        }
+      }
+      game.micro.pointerPrev = pt;
+      if (d.lines.every((l) => l.cut)) return { done: true, won: true };
+      return null;
+    },
+    onTimeout() { return false; },
+    draw() {
+      for (const ln of game.micro.data.lines) {
+        stroke(ln.cut ? color(120, 255, 150, 170) : color(255, 210, 120, 240));
+        strokeWeight(4);
+        line(ln.x1, ln.y1, ln.x2, ln.y2);
+      }
+    }
+  };
+}
+
+function segmentsIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
+  const d = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (abs(d) < 0.00001) return false;
+  const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / d;
+  const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / d;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
+class LowPassFilter {
+  constructor(alpha, initVal = 0) {
+    this.y = initVal;
+    this.s = initVal;
+    this.initialized = false;
+    this.setAlpha(alpha);
+  }
+  setAlpha(alpha) { this.alpha = alpha; }
+  filter(value) {
+    let result;
+    if (this.initialized) result = this.alpha * value + (1 - this.alpha) * this.s;
+    else { result = value; this.initialized = true; }
+    this.y = value;
+    this.s = result;
+    return result;
+  }
+  hasLastRawValue() { return this.initialized; }
+  lastRawValue() { return this.y; }
+  reset(value = 0) {
+    this.y = value;
+    this.s = value;
+    this.initialized = false;
+  }
+}
+
+class OneEuroFilter {
+  constructor(freq, minCutoff = 1.0, beta = 0.0, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.x = new LowPassFilter(this.alpha(minCutoff));
+    this.dx = new LowPassFilter(this.alpha(dCutoff));
+    this.lastTime = null;
+  }
+  alpha(cutoff) {
+    const te = 1.0 / this.freq;
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+  filter(value, timestamp = null) {
+    if (this.lastTime !== null && timestamp !== null) {
+      const dt = timestamp - this.lastTime;
+      if (dt > 0) this.freq = 1.0 / dt;
+    }
+    this.lastTime = timestamp;
+    const dValue = this.x.hasLastRawValue() ? (value - this.x.lastRawValue()) * this.freq : 0.0;
+    const edValue = this.dx.filter(dValue);
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue);
+    this.x.setAlpha(this.alpha(cutoff));
+    return this.x.filter(value);
+  }
+  reset(value = 0) {
+    this.x.reset(value);
+    this.dx.reset(0);
+    this.lastTime = null;
+  }
+}
+</script>
+</body>
+</html>
